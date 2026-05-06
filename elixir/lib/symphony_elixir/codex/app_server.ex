@@ -1,7 +1,12 @@
 defmodule SymphonyElixir.Codex.AppServer do
   @moduledoc """
   Minimal client for the Codex app-server JSON-RPC 2.0 stream over stdio.
+
+  Implements `SymphonyElixir.Agent` so the orchestrator can dispatch through
+  the generic agent boundary regardless of which coding agent is configured.
   """
+
+  @behaviour SymphonyElixir.Agent
 
   require Logger
   alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety, SSH}

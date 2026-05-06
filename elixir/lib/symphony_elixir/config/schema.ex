@@ -456,15 +456,23 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
-  defp env_reference_name("$" <> env_name) do
+  defp env_reference_name("${" <> rest) do
+    case String.split(rest, "}", parts: 2) do
+      [env_name, ""] -> validate_env_name(env_name)
+      _ -> :error
+    end
+  end
+
+  defp env_reference_name("$" <> env_name), do: validate_env_name(env_name)
+  defp env_reference_name(_value), do: :error
+
+  defp validate_env_name(env_name) do
     if String.match?(env_name, ~r/^[A-Za-z_][A-Za-z0-9_]*$/) do
       {:ok, env_name}
     else
       :error
     end
   end
-
-  defp env_reference_name(_value), do: :error
 
   defp resolve_env_token(env_name) do
     case System.get_env(env_name) do

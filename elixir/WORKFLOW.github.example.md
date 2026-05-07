@@ -16,6 +16,15 @@ workspace:
 hooks:
   after_create: |
     git clone --depth 1 https://github.com/your-org/your-repo .
+  before_run: |
+    # Move issue to in-progress before the agent starts so dashboards (and humans)
+    # see the active state immediately, not retroactively when the agent finishes.
+    # --add-label is idempotent; --remove-label tolerates the case where the label
+    # was already removed (retry / resumed dispatch).
+    gh issue edit {{ issue.identifier }} --repo your-org/your-repo \
+      --add-label symphony:in-progress
+    gh issue edit {{ issue.identifier }} --repo your-org/your-repo \
+      --remove-label symphony:todo 2>/dev/null || true
   before_remove: |
     true
 agent:

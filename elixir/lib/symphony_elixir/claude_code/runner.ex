@@ -60,9 +60,7 @@ defmodule SymphonyElixir.ClaudeCode.Runner do
     settings = claude_code_settings()
     claude_args = build_args(session_id, settings) ++ [prompt]
 
-    Logger.info(
-      "Claude Code turn starting for #{issue_context(issue)} session_id=#{session_id} workspace=#{workspace} prompt_bytes=#{byte_size(prompt)}"
-    )
+    Logger.info("Claude Code turn starting for #{issue_context(issue)} session_id=#{session_id} workspace=#{workspace} prompt_bytes=#{byte_size(prompt)}")
 
     sh = System.find_executable("sh") || raise ArgumentError, "sh not found on PATH"
     claude_bin = locate_binary!(settings.command)
@@ -86,16 +84,12 @@ defmodule SymphonyElixir.ClaudeCode.Runner do
 
     case stream_loop(port, on_message, []) do
       {:ok, _events} ->
-        Logger.info(
-          "Claude Code turn completed for #{issue_context(issue)} session_id=#{session_id}"
-        )
+        Logger.info("Claude Code turn completed for #{issue_context(issue)} session_id=#{session_id}")
 
         {:ok, %{session_id: session_id, thread_id: session_id, turn_id: session_id}}
 
       {:error, reason} ->
-        Logger.warning(
-          "Claude Code turn failed for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}"
-        )
+        Logger.warning("Claude Code turn failed for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
 
         {:error, reason}
     end
@@ -185,9 +179,25 @@ defmodule SymphonyElixir.ClaudeCode.Runner do
     end
   end
 
-  defp locate_binary!("/" <> _ = path), do: path
+  @doc """
+  Resolves a `claude_code.command` value to an executable path.
 
-  defp locate_binary!(name) do
+  Three input shapes are supported, in order of priority:
+
+    * absolute paths (`"/usr/bin/claude"`) — returned verbatim.
+    * tilde-prefixed paths (`"~/.local/bin/claude"`) — `Path.expand/1`'d so
+      WORKFLOW.md authors can target a per-user install without baking the
+      runtime PATH of the operator (e.g. systemd-managed Symphony processes
+      whose service environment doesn't include `~/.local/bin`).
+    * bare names (`"claude"`) — looked up via `System.find_executable/1`.
+
+  Public so it can be exercised from tests without spawning a real port.
+  """
+  @spec locate_binary!(String.t()) :: String.t()
+  def locate_binary!("/" <> _ = path), do: path
+  def locate_binary!("~" <> _ = path), do: Path.expand(path)
+
+  def locate_binary!(name) do
     case System.find_executable(name) do
       nil -> raise ArgumentError, "claude binary #{inspect(name)} not found on PATH"
       path -> path

@@ -60,9 +60,7 @@ defmodule SymphonyElixir.ClaudeCode.Runner do
     settings = claude_code_settings()
     claude_args = build_args(session_id, settings) ++ [prompt]
 
-    Logger.info(
-      "Claude Code turn starting for #{issue_context(issue)} session_id=#{session_id} workspace=#{workspace} prompt_bytes=#{byte_size(prompt)}"
-    )
+    Logger.info("Claude Code turn starting for #{issue_context(issue)} session_id=#{session_id} workspace=#{workspace} prompt_bytes=#{byte_size(prompt)}")
 
     sh = System.find_executable("sh") || raise ArgumentError, "sh not found on PATH"
     claude_bin = locate_binary!(settings.command)
@@ -86,16 +84,12 @@ defmodule SymphonyElixir.ClaudeCode.Runner do
 
     case stream_loop(port, on_message, []) do
       {:ok, _events} ->
-        Logger.info(
-          "Claude Code turn completed for #{issue_context(issue)} session_id=#{session_id}"
-        )
+        Logger.info("Claude Code turn completed for #{issue_context(issue)} session_id=#{session_id}")
 
         {:ok, %{session_id: session_id, thread_id: session_id, turn_id: session_id}}
 
       {:error, reason} ->
-        Logger.warning(
-          "Claude Code turn failed for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}"
-        )
+        Logger.warning("Claude Code turn failed for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
 
         {:error, reason}
     end

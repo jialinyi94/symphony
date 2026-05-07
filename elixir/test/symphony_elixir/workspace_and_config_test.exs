@@ -242,12 +242,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     try do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_after_create:
-          "echo id={{ issue.id }} ident={{ issue.identifier }} > rendered.txt"
+        hook_after_create: "echo id={{ issue.id }} ident={{ issue.identifier }} > rendered.txt"
       )
 
       issue = %Issue{id: "issue-42", identifier: "ABC-42", state: "Todo"}
       assert {:ok, workspace} = Workspace.create_for_issue(issue)
+
       assert File.read!(Path.join(workspace, "rendered.txt")) ==
                "id=issue-42 ident=ABC-42\n"
     after
@@ -1320,9 +1320,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
         worker_ssh_hosts: ["worker-01:2200"],
-        hook_before_run: "echo before-run",
-        hook_after_run: "echo after-run",
-        hook_before_remove: "echo before-remove"
+        hook_before_run: "echo before-run-{{ issue.identifier }}",
+        hook_after_run: "echo after-run-{{ issue.identifier }}",
+        hook_before_remove: "echo before-remove-{{ issue.identifier }}"
       )
 
       assert Config.settings!().worker.ssh_hosts == ["worker-01:2200"]
@@ -1337,9 +1337,14 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert trace =~ "__SYMPHONY_WORKSPACE__"
       assert trace =~ "~/.symphony-remote-workspaces/MT-SSH-WS"
       assert trace =~ "${workspace#~/}"
-      assert trace =~ "echo before-run"
-      assert trace =~ "echo after-run"
-      assert trace =~ "echo before-remove"
+      # All three hook bodies use `{{ issue.identifier }}`; the SSH trace must
+      # show the rendered identifier (not the literal Liquid braces) so that
+      # remote `before_remove` cleanup commands like
+      # `git branch -D "symphony/issue-{{ issue.identifier }}"` actually work.
+      assert trace =~ "echo before-run-MT-SSH-WS"
+      assert trace =~ "echo after-run-MT-SSH-WS"
+      assert trace =~ "echo before-remove-MT-SSH-WS"
+      refute trace =~ "{{ issue.identifier }}"
       assert trace =~ "rm -rf"
       assert trace =~ workspace_path
     after

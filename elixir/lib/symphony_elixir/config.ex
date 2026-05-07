@@ -119,17 +119,11 @@ defmodule SymphonyElixir.Config do
       is_nil(settings.tracker.kind) ->
         {:error, :missing_tracker_kind}
 
-      settings.tracker.kind not in ["linear", "memory"] ->
-        {:error, {:unsupported_tracker_kind, settings.tracker.kind}}
-
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.api_key) ->
-        {:error, :missing_linear_api_token}
-
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.project_slug) ->
-        {:error, :missing_linear_project_slug}
-
       true ->
-        :ok
+        case SymphonyElixir.Tracker.adapter_for_kind(settings.tracker.kind) do
+          {:ok, adapter} -> adapter.validate_config(settings.tracker)
+          {:error, _} = err -> err
+        end
     end
   end
 

@@ -7,6 +7,21 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   alias SymphonyElixir.Linear.Client
 
+  @impl true
+  def kind, do: "linear"
+
+  @impl true
+  def secret_env_var, do: "LINEAR_API_KEY"
+
+  @impl true
+  def validate_config(tracker) do
+    cond do
+      not is_binary(tracker.api_key) -> {:error, :missing_linear_api_token}
+      not is_binary(tracker.project_slug) -> {:error, :missing_linear_project_slug}
+      true -> :ok
+    end
+  end
+
   @create_comment_mutation """
   mutation SymphonyCreateComment($issueId: String!, $body: String!) {
     commentCreate(input: {issueId: $issueId, body: $body}) {
@@ -37,16 +52,16 @@ defmodule SymphonyElixir.Linear.Adapter do
   }
   """
 
-  @spec fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
+  @impl true
   def fetch_candidate_issues, do: client_module().fetch_candidate_issues()
 
-  @spec fetch_issues_by_states([String.t()]) :: {:ok, [term()]} | {:error, term()}
+  @impl true
   def fetch_issues_by_states(states), do: client_module().fetch_issues_by_states(states)
 
-  @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
+  @impl true
   def fetch_issue_states_by_ids(issue_ids), do: client_module().fetch_issue_states_by_ids(issue_ids)
 
-  @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
+  @impl true
   def create_comment(issue_id, body) when is_binary(issue_id) and is_binary(body) do
     with {:ok, response} <- client_module().graphql(@create_comment_mutation, %{issueId: issue_id, body: body}),
          true <- get_in(response, ["data", "commentCreate", "success"]) == true do
@@ -58,7 +73,7 @@ defmodule SymphonyElixir.Linear.Adapter do
     end
   end
 
-  @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
+  @impl true
   def update_issue_state(issue_id, state_name)
       when is_binary(issue_id) and is_binary(state_name) do
     with {:ok, state_id} <- resolve_state_id(issue_id, state_name),

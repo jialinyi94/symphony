@@ -232,6 +232,49 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "after_create hook renders {{ issue.identifier }} and {{ issue.id }} via Solid" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-hook-render-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create:
+          "echo id={{ issue.id }} ident={{ issue.identifier }} > rendered.txt"
+      )
+
+      issue = %Issue{id: "issue-42", identifier: "ABC-42", state: "Todo"}
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert File.read!(Path.join(workspace, "rendered.txt")) ==
+               "id=issue-42 ident=ABC-42\n"
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "after_create hook with invalid template surfaces a hook_template_error" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-hook-bad-template-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "echo {{ issue.does_not_exist }}"
+      )
+
+      assert {:error, {:workspace_hook_failed, "after_create", :hook_template_error, _reason}} =
+               Workspace.create_for_issue("MT-BAD-TPL")
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "workspace creates an empty directory when no bootstrap hook is configured" do
     workspace_root =
       Path.join(

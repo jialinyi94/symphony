@@ -292,42 +292,80 @@ defmodule SymphonyElixir.Workspace do
   defp ignore_hook_failure({:error, _reason}), do: :ok
 
   defp run_hook(command, workspace, issue_context, hook_name, nil) do
-    timeout_ms = Config.settings!().hooks.timeout_ms
+    with {:ok, rendered} <- render_hook_command(command, issue_context, hook_name) do
+      timeout_ms = Config.settings!().hooks.timeout_ms
 
-    Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=local")
+      Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=local")
 
-    task =
-      Task.async(fn ->
-        System.cmd("sh", ["-lc", command], cd: workspace, stderr_to_stdout: true)
-      end)
+      task =
+        Task.async(fn ->
+          System.cmd("sh", ["-lc", rendered], cd: workspace, stderr_to_stdout: true)
+        end)
 
-    case Task.yield(task, timeout_ms) do
-      {:ok, cmd_result} ->
-        handle_hook_command_result(cmd_result, workspace, issue_context, hook_name)
+      case Task.yield(task, timeout_ms) do
+        {:ok, cmd_result} ->
+          handle_hook_command_result(cmd_result, workspace, issue_context, hook_name)
 
-      nil ->
-        Task.shutdown(task, :brutal_kill)
+        nil ->
+          Task.shutdown(task, :brutal_kill)
 
-        Logger.warning("Workspace hook timed out hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=local timeout_ms=#{timeout_ms}")
+          Logger.warning("Workspace hook timed out hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=local timeout_ms=#{timeout_ms}")
 
-        {:error, {:workspace_hook_timeout, hook_name, timeout_ms}}
+          {:error, {:workspace_hook_timeout, hook_name, timeout_ms}}
+      end
     end
   end
 
   defp run_hook(command, workspace, issue_context, hook_name, worker_host) when is_binary(worker_host) do
-    timeout_ms = Config.settings!().hooks.timeout_ms
+    with {:ok, rendered} <- render_hook_command(command, issue_context, hook_name) do
+      timeout_ms = Config.settings!().hooks.timeout_ms
 
-    Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host}")
+      Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host}")
 
-    case run_remote_command(worker_host, "cd #{shell_escape(workspace)} && #{command}", timeout_ms) do
-      {:ok, cmd_result} ->
-        handle_hook_command_result(cmd_result, workspace, issue_context, hook_name)
+      case run_remote_command(worker_host, "cd #{shell_escape(workspace)} && #{rendered}", timeout_ms) do
+        {:ok, cmd_result} ->
+          handle_hook_command_result(cmd_result, workspace, issue_context, hook_name)
 
-      {:error, {:workspace_hook_timeout, ^hook_name, _timeout_ms} = reason} ->
-        {:error, reason}
+        {:error, {:workspace_hook_timeout, ^hook_name, _timeout_ms} = reason} ->
+          {:error, reason}
 
-      {:error, reason} ->
-        {:error, reason}
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  # Renders a hook's shell-script body as a Solid (Liquid-compatible) template
+  # with the same `issue` shape that prompt_builder uses (`{{ issue.id }}`,
+  # `{{ issue.identifier }}`). Strict mode mirrors prompt_builder so unknown
+  # variables become a hook config error rather than silently disappearing.
+  # Template errors are logged + surfaced as :hook_template_error so the
+  # orchestrator's existing hook-failure handling kicks in (no raise).
+  @hook_render_opts [strict_variables: true, strict_filters: true]
+
+  defp render_hook_command(command, issue_context, hook_name) when is_binary(command) do
+    context = %{
+      "issue" => %{
+        "id" => issue_context.issue_id,
+        "identifier" => issue_context.issue_identifier
+      }
+    }
+
+    try do
+      rendered =
+        command
+        |> Solid.parse!()
+        |> Solid.render!(context, @hook_render_opts)
+        |> IO.iodata_to_binary()
+
+      {:ok, rendered}
+    rescue
+      error ->
+        Logger.warning(
+          "Workspace hook template error hook=#{hook_name} #{issue_log_context(issue_context)} error=#{Exception.message(error)}"
+        )
+
+        {:error, {:workspace_hook_failed, hook_name, :hook_template_error, Exception.message(error)}}
     end
   end
 

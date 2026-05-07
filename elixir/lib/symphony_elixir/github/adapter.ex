@@ -19,10 +19,10 @@ defmodule SymphonyElixir.GitHub.Adapter do
 
   @impl true
   def validate_config(tracker) do
-    if is_binary(tracker.api_key) do
-      :ok
-    else
-      {:error, :missing_github_token}
+    cond do
+      not is_binary(tracker.api_key) -> {:error, :missing_github_token}
+      not is_binary(tracker.repo) or tracker.repo == "" -> {:error, :missing_github_repo}
+      true -> :ok
     end
   end
 

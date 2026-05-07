@@ -188,7 +188,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
 
     assert Config.settings!().tracker.kind == "memory"
-    assert SymphonyElixir.Tracker.adapter() == Memory
+    assert {:ok, Memory} = SymphonyElixir.Tracker.adapter()
     assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_candidate_issues()
     assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_issues_by_states([" in progress ", 42])
     assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_issue_states_by_ids(["issue-1"])
@@ -202,7 +202,19 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert :ok = Memory.update_issue_state("issue-1", "Quiet")
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
-    assert SymphonyElixir.Tracker.adapter() == Adapter
+    assert {:ok, Adapter} = SymphonyElixir.Tracker.adapter()
+  end
+
+  test "tracker dispatch returns error tuple for unsupported kind, never raises" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "totally-not-a-tracker")
+
+    error = {:error, {:unsupported_tracker_kind, "totally-not-a-tracker"}}
+    assert ^error = SymphonyElixir.Tracker.adapter()
+    assert ^error = SymphonyElixir.Tracker.fetch_candidate_issues()
+    assert ^error = SymphonyElixir.Tracker.fetch_issue_states_by_ids(["issue-1"])
+    assert ^error = SymphonyElixir.Tracker.fetch_issues_by_states(["Todo"])
+    assert ^error = SymphonyElixir.Tracker.create_comment("issue-1", "body")
+    assert ^error = SymphonyElixir.Tracker.update_issue_state("issue-1", "Done")
   end
 
   test "linear adapter delegates reads and validates mutation responses" do

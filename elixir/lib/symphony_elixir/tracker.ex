@@ -58,40 +58,37 @@ defmodule SymphonyElixir.Tracker do
 
   @spec fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   def fetch_candidate_issues do
-    adapter().fetch_candidate_issues()
+    with {:ok, mod} <- adapter(), do: mod.fetch_candidate_issues()
   end
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [term()]} | {:error, term()}
   def fetch_issues_by_states(states) do
-    adapter().fetch_issues_by_states(states)
+    with {:ok, mod} <- adapter(), do: mod.fetch_issues_by_states(states)
   end
 
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
   def fetch_issue_states_by_ids(issue_ids) do
-    adapter().fetch_issue_states_by_ids(issue_ids)
+    with {:ok, mod} <- adapter(), do: mod.fetch_issue_states_by_ids(issue_ids)
   end
 
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   def create_comment(issue_id, body) do
-    adapter().create_comment(issue_id, body)
+    with {:ok, mod} <- adapter(), do: mod.create_comment(issue_id, body)
   end
 
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
   def update_issue_state(issue_id, state_name) do
-    adapter().update_issue_state(issue_id, state_name)
+    with {:ok, mod} <- adapter(), do: mod.update_issue_state(issue_id, state_name)
   end
 
-  @spec adapter() :: module()
+  @doc """
+  Returns the adapter module for the configured tracker kind, or an error
+  tuple. Never raises — keeping the orchestrator alive when a workflow is
+  edited to an unsupported kind is more important than failing fast here,
+  since `Config.validate!/0` reports the same error in the polling loop.
+  """
+  @spec adapter() :: {:ok, module()} | {:error, {:unsupported_tracker_kind, term()}}
   def adapter do
-    kind = Config.settings!().tracker.kind
-
-    case adapter_for_kind(kind) do
-      {:ok, mod} ->
-        mod
-
-      {:error, _} ->
-        raise ArgumentError,
-          message: "Unsupported tracker kind in WORKFLOW.md: #{inspect(kind)}"
-    end
+    adapter_for_kind(Config.settings!().tracker.kind)
   end
 end

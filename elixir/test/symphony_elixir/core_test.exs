@@ -133,7 +133,7 @@ defmodule SymphonyElixir.CoreTest do
     assert :ok = Config.validate!()
   end
 
-  test "github tracker passes validate when api_key is provided" do
+  test "github tracker passes validate when api_key and repo are provided" do
     previous_github_token = System.get_env("GITHUB_TOKEN")
     on_exit(fn -> restore_env("GITHUB_TOKEN", previous_github_token) end)
     System.delete_env("GITHUB_TOKEN")
@@ -141,6 +141,7 @@ defmodule SymphonyElixir.CoreTest do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "github",
       tracker_api_token: "gh-token",
+      tracker_repo: "owner/repo",
       tracker_project_slug: nil
     )
 
@@ -157,6 +158,7 @@ defmodule SymphonyElixir.CoreTest do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "github",
       tracker_api_token: nil,
+      tracker_repo: "owner/repo",
       tracker_project_slug: nil
     )
 
@@ -172,10 +174,26 @@ defmodule SymphonyElixir.CoreTest do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "github",
       tracker_api_token: nil,
+      tracker_repo: "owner/repo",
       tracker_project_slug: nil
     )
 
     assert {:error, :missing_github_token} = Config.validate!()
+  end
+
+  test "github tracker fails validation when repo is missing" do
+    previous_github_token = System.get_env("GITHUB_TOKEN")
+    on_exit(fn -> restore_env("GITHUB_TOKEN", previous_github_token) end)
+    System.put_env("GITHUB_TOKEN", "gh-token")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_api_token: nil,
+      tracker_repo: nil,
+      tracker_project_slug: nil
+    )
+
+    assert {:error, :missing_github_repo} = Config.validate!()
   end
 
   test "linear assignee resolves from LINEAR_ASSIGNEE env var" do

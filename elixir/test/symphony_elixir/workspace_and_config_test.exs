@@ -1028,7 +1028,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert {:ok, settings} =
              Schema.parse(%{
-               tracker: %{api_key: "$#{empty_secret_env}"},
+               tracker: %{kind: "linear", api_key: "$#{empty_secret_env}"},
                workspace: %{root: "$#{missing_workspace_env}"},
                codex: %{approval_policy: %{reject: %{sandbox_approval: true}}}
              })
@@ -1042,7 +1042,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert {:ok, settings} =
              Schema.parse(%{
-               tracker: %{api_key: "$#{missing_secret_env}"},
+               tracker: %{kind: "linear", api_key: "$#{missing_secret_env}"},
                workspace: %{root: ""}
              })
 

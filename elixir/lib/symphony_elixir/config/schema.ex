@@ -391,9 +391,9 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp finalize_settings(settings) do
     api_key_fallback =
-      case settings.tracker.kind do
-        "github" -> System.get_env("GITHUB_TOKEN")
-        _ -> System.get_env("LINEAR_API_KEY")
+      case SymphonyElixir.Tracker.api_key_env_var(settings.tracker.kind) do
+        nil -> nil
+        var -> System.get_env(var)
       end
 
     tracker = %{

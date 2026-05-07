@@ -12,6 +12,21 @@ defmodule SymphonyElixir.GitHub.Adapter do
   alias SymphonyElixir.{Config, GitHub.Client, GitHub.StateMapping}
 
   @impl true
+  def kind, do: "github"
+
+  @impl true
+  def secret_env_var, do: "GITHUB_TOKEN"
+
+  @impl true
+  def validate_config(tracker) do
+    cond do
+      not is_binary(tracker.api_key) -> {:error, :missing_github_token}
+      not is_binary(tracker.repo) or tracker.repo == "" -> {:error, :missing_github_repo}
+      true -> :ok
+    end
+  end
+
+  @impl true
   def fetch_candidate_issues, do: client_module().fetch_candidate_issues()
 
   @impl true

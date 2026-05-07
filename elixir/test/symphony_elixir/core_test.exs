@@ -133,6 +133,69 @@ defmodule SymphonyElixir.CoreTest do
     assert :ok = Config.validate!()
   end
 
+  test "github tracker passes validate when api_key and repo are provided" do
+    previous_github_token = System.get_env("GITHUB_TOKEN")
+    on_exit(fn -> restore_env("GITHUB_TOKEN", previous_github_token) end)
+    System.delete_env("GITHUB_TOKEN")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_api_token: "gh-token",
+      tracker_repo: "owner/repo",
+      tracker_project_slug: nil
+    )
+
+    assert :ok = Config.validate!()
+  end
+
+  test "github api token resolves from GITHUB_TOKEN env var" do
+    previous_github_token = System.get_env("GITHUB_TOKEN")
+    env_token = "test-github-token"
+
+    on_exit(fn -> restore_env("GITHUB_TOKEN", previous_github_token) end)
+    System.put_env("GITHUB_TOKEN", env_token)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_api_token: nil,
+      tracker_repo: "owner/repo",
+      tracker_project_slug: nil
+    )
+
+    assert Config.settings!().tracker.api_key == env_token
+    assert :ok = Config.validate!()
+  end
+
+  test "github tracker fails validation when api_key is missing everywhere" do
+    previous_github_token = System.get_env("GITHUB_TOKEN")
+    on_exit(fn -> restore_env("GITHUB_TOKEN", previous_github_token) end)
+    System.delete_env("GITHUB_TOKEN")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_api_token: nil,
+      tracker_repo: "owner/repo",
+      tracker_project_slug: nil
+    )
+
+    assert {:error, :missing_github_token} = Config.validate!()
+  end
+
+  test "github tracker fails validation when repo is missing" do
+    previous_github_token = System.get_env("GITHUB_TOKEN")
+    on_exit(fn -> restore_env("GITHUB_TOKEN", previous_github_token) end)
+    System.put_env("GITHUB_TOKEN", "gh-token")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_api_token: nil,
+      tracker_repo: nil,
+      tracker_project_slug: nil
+    )
+
+    assert {:error, :missing_github_repo} = Config.validate!()
+  end
+
   test "linear assignee resolves from LINEAR_ASSIGNEE env var" do
     previous_linear_assignee = System.get_env("LINEAR_ASSIGNEE")
     env_assignee = "dev@example.com"

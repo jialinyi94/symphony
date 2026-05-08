@@ -16,6 +16,19 @@ workspace:
 hooks:
   after_create: |
     git clone --depth 1 https://github.com/your-org/your-repo .
+  before_run: |
+    # Move issue to in-progress before the agent starts so dashboards (and humans)
+    # see the active state immediately, not retroactively when the agent finishes.
+    #
+    # `sh -lc` (Workspace.run_hook) does not enable `set -e`, so the script's
+    # exit status is the last command's. We chain with && so an add-label
+    # failure (auth, network, missing gh) propagates as a hook failure rather
+    # than being masked by the trailing `|| true`. The remove-label tolerates
+    # the already-removed case (retry / resumed dispatch).
+    gh issue edit {{ issue.identifier }} --repo your-org/your-repo \
+      --add-label symphony:in-progress \
+    && { gh issue edit {{ issue.identifier }} --repo your-org/your-repo \
+           --remove-label symphony:todo 2>/dev/null || true; }
   before_remove: |
     true
 agent:

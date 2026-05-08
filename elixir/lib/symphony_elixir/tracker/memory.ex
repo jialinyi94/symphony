@@ -53,6 +53,12 @@ defmodule SymphonyElixir.Tracker.Memory do
     :ok
   end
 
+  @impl true
+  def fetch_sub_issues(parent_id) when is_binary(parent_id) do
+    map = Application.get_env(:symphony_elixir, :memory_tracker_sub_issues, %{})
+    {:ok, Map.get(map, parent_id, [])}
+  end
+
   defp configured_issues do
     Application.get_env(:symphony_elixir, :memory_tracker_issues, [])
   end

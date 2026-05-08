@@ -167,4 +167,41 @@ defmodule SymphonyElixir.OrchestratorEpicTest do
       end)
     end
   end
+
+  describe "epic reaper" do
+    test "closes parent when every child is Done" do
+      epic = %SymphonyElixir.Issue{id: "200", identifier: "200", title: "Epic", state: "Epic Tracking", labels: ["symphony:epic-tracking"]}
+      done_a = %SymphonyElixir.Issue{id: "201", identifier: "201", title: "A", state: "Done", labels: ["symphony:done"]}
+      done_b = %SymphonyElixir.Issue{id: "202", identifier: "202", title: "B", state: "Done", labels: ["symphony:done"]}
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [epic, done_a, done_b])
+      Application.put_env(:symphony_elixir, :memory_tracker_sub_issues, %{"200" => [201, 202]})
+
+      :ok = SymphonyElixir.OrchestratorTestHelper.tick()
+      assert_receive {:memory_tracker_state_update, "200", "Done"}, 500
+    end
+
+    test "does NOT close parent when any child is still active" do
+      epic = %SymphonyElixir.Issue{id: "300", identifier: "300", title: "Epic", state: "Epic Tracking"}
+      in_progress = %SymphonyElixir.Issue{id: "301", identifier: "301", state: "In Progress"}
+      done = %SymphonyElixir.Issue{id: "302", identifier: "302", state: "Done"}
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [epic, in_progress, done])
+      Application.put_env(:symphony_elixir, :memory_tracker_sub_issues, %{"300" => [301, 302]})
+
+      :ok = SymphonyElixir.OrchestratorTestHelper.tick()
+      refute_receive {:memory_tracker_state_update, "300", _}, 200
+    end
+
+    test "does NOT close parent if a child is in Human Review (PR not merged)" do
+      epic = %SymphonyElixir.Issue{id: "400", identifier: "400", title: "Epic", state: "Epic Tracking"}
+      human_review = %SymphonyElixir.Issue{id: "401", identifier: "401", state: "Human Review"}
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [epic, human_review])
+      Application.put_env(:symphony_elixir, :memory_tracker_sub_issues, %{"400" => [401]})
+
+      :ok = SymphonyElixir.OrchestratorTestHelper.tick()
+      refute_receive {:memory_tracker_state_update, "400", _}, 200
+    end
+  end
 end

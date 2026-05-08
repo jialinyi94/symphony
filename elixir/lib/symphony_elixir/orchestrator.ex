@@ -234,6 +234,8 @@ defmodule SymphonyElixir.Orchestrator do
          {:ok, issues} <- Tracker.fetch_candidate_issues() do
       :ok = escalate_failed_planner_runs(issues, state.running)
 
+      run_epic_reaper(issues)
+
       if available_slots(state) > 0 do
         choose_issues(issues, state)
       else
@@ -1155,6 +1157,40 @@ defmodule SymphonyElixir.Orchestrator do
     end)
 
     :ok
+  end
+
+  defp run_epic_reaper(issues) do
+    epics = Enum.filter(issues, &(&1.state == "Epic Tracking"))
+
+    Enum.each(epics, fn epic ->
+      case Tracker.fetch_sub_issues(epic.id) do
+        {:ok, [_ | _] = sub_numbers} ->
+          if all_children_done?(sub_numbers, issues) do
+            Logger.info("Epic reaper: closing #{issue_context(epic)} (all children Done)")
+
+            case Tracker.update_issue_state(epic.id, "Done") do
+              :ok ->
+                :ok
+
+              {:error, reason} ->
+                Logger.warning("Epic reaper: failed to close #{epic.id}: #{inspect(reason)}")
+            end
+          else
+            :ok
+          end
+
+        _ ->
+          :ok
+      end
+    end)
+  end
+
+  defp all_children_done?(sub_numbers, issues) do
+    by_id = Map.new(issues, &{&1.identifier, &1.state})
+
+    Enum.all?(sub_numbers, fn n ->
+      Map.get(by_id, Integer.to_string(n)) == "Done"
+    end)
   end
 
   defp planner_failed?(%Issue{id: id, state: state})

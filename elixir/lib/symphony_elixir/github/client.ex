@@ -48,6 +48,26 @@ defmodule SymphonyElixir.GitHub.Client do
     end
   end
 
+  @spec fetch_sub_issues(String.t()) :: {:ok, [integer()]} | {:error, term()}
+  def fetch_sub_issues(issue_id) when is_binary(issue_id) do
+    settings = Config.settings!().tracker
+
+    with {:ok, headers} <- request_headers() do
+      url = "#{api_base()}/repos/#{repo!(settings)}/issues/#{issue_id}/sub_issues"
+
+      case Req.get(url, headers: headers, params: [per_page: @per_page], connect_options: [timeout: 30_000]) do
+        {:ok, %{status: 200, body: body}} when is_list(body) ->
+          {:ok, body |> Enum.map(& &1["number"]) |> Enum.reject(&is_nil/1)}
+
+        {:ok, response} ->
+          {:error, {:github_http_error, response.status, summarize(response)}}
+
+        {:error, reason} ->
+          {:error, {:github_request_failed, reason}}
+      end
+    end
+  end
+
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   def create_comment(issue_id, body) when is_binary(issue_id) and is_binary(body) do
     settings = Config.settings!().tracker
@@ -213,7 +233,9 @@ defmodule SymphonyElixir.GitHub.Client do
   defp repo!(_),
     do: raise(ArgumentError, "tracker.repo must be set (format: \"owner/name\") for github tracker")
 
-  defp api_base, do: "https://api.github.com"
+  defp api_base do
+    Application.get_env(:symphony_elixir, :github_api_base, "https://api.github.com")
+  end
 
   defp summarize(response) do
     body =

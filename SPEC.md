@@ -1209,6 +1209,78 @@ Symphony does not require first-class tracker write APIs in the orchestrator.
 - If the `linear_graphql` client-side tool extension is implemented, it is still part of the agent
   toolchain rather than orchestrator business logic.
 
+## 11.6 Epic handling (GitHub)
+
+GitHub issues can have structured sub-issues via the native sub-issues API.
+Symphony treats issues with non-empty `sub_issues` as epics and processes
+them in three phases:
+
+1. **Planner phase.** When a `Todo` issue is detected as an epic and no plan
+   comment exists yet, Symphony dispatches an agent run with the
+   `epic_planner` prompt variant and `max_turns: 4`. The planner reads each
+   sub-issue, comments a YAML dependency plan on the parent (between
+   `<!-- symphony-plan:v1 -->` markers), labels each child `symphony:todo`,
+   and switches the parent's label to `symphony:epic-tracking`. No code is
+   written; no PR is opened.
+
+2. **Execution phase.** On subsequent polling cycles, the GitHub adapter
+   parses the parent's plan comment and populates `blocked_by` on each
+   child issue. The existing orchestrator dispatch gate
+   (`todo_issue_blocked_by_non_terminal?/2`) handles topological ordering
+   for free — children whose blockers haven't reached `Done` stay queued.
+
+3. **Reaping.** Each polling tick runs an epic reaper: for any issue in
+   state `Epic Tracking`, if every sub-issue is in state `Done`, the parent
+   is transitioned to `Done` and closed.
+
+### YAML plan format (v1)
+
+```yaml
+<!-- symphony-plan:v1 -->
+schema: 1
+generated_at: 2026-05-08T12:34:56Z
+sub_issues:
+  - id: 134
+    blocked_by: []
+    rationale: "Defines DB schema; everything else needs it."
+  - id: 135
+    blocked_by: [134]
+    rationale: "Migration depends on schema."
+<!-- /symphony-plan -->
+```
+
+### State machine
+
+| Entity | State path |
+|---|---|
+| Parent epic | `Todo` -> (planner runs) -> `Epic Tracking` -> (reaper) -> `Done` |
+| Child sub-issue | (no Symphony label) -> (planner labels) -> `Todo` -> `In Progress` -> `Human Review` -> `Done` |
+
+`Epic Tracking` is in `active_states` (so `state_from_labels` decodes it),
+but `assigned_to_worker` is set to `false` for issues in this state, which
+makes the orchestrator's `issue_routable_to_worker?` gate skip them.
+This keeps the parent open in GitHub while children run.
+
+### Planner failure handling
+
+If the planner agent run completes without writing a valid plan block,
+the orchestrator's pre-dispatch escalator notices on the next tick that
+the epic is in `In Progress` state with sub-issues but no plan, and moves
+it to `Human Review` with a diagnostic comment. The escalator skips
+issues currently in the orchestrator's running set, so an in-flight
+planner is not prematurely escalated.
+
+### v1 limitations
+
+- Re-planning when an epic body or sub-issue list mutates is not supported.
+  To force a re-plan: delete the parent's plan comment and remove the
+  `symphony:epic-tracking` label.
+- Nested epics (a sub-issue that is itself an epic) are not recursively
+  expanded.
+- Children execute serially while `agent.max_concurrent_agents == 1`.
+  Bumping this config enables parallel children with no further code
+  changes — the dependency graph is honored either way.
+
 ## 12. Prompt Construction and Context Assembly
 
 ### 12.1 Inputs

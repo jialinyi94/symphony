@@ -19,6 +19,7 @@ defmodule SymphonyElixir.Orchestrator do
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
+  @epic_planner_max_turns 4
   @empty_codex_totals %{
     input_tokens: 0,
     output_tokens: 0,
@@ -231,7 +232,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_candidate_issues() do
-      :ok = escalate_failed_planner_runs(issues)
+      :ok = escalate_failed_planner_runs(issues, state.running)
 
       if available_slots(state) > 0 do
         choose_issues(issues, state)
@@ -1086,7 +1087,7 @@ defmodule SymphonyElixir.Orchestrator do
       {:epic, sub_numbers} ->
         Keyword.merge(base_opts,
           variant: :epic_planner,
-          max_turns: 4,
+          max_turns: @epic_planner_max_turns,
           epic: %{sub_issue_numbers: sub_numbers}
         )
 
@@ -1111,16 +1112,42 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp epic_classification(_issue), do: :regular
 
-  defp escalate_failed_planner_runs(issues) when is_list(issues) do
+  defp escalate_failed_planner_runs(issues, running)
+       when is_list(issues) and is_map(running) do
     Enum.each(issues, fn
       %Issue{} = issue ->
-        if planner_failed?(issue) do
-          Logger.warning(
-            "Epic planner failure detected for #{issue_context(issue)}; escalating to Human Review"
-          )
+        cond do
+          Map.has_key?(running, issue.id) ->
+            # Planner is mid-flight on a worker; do not escalate.
+            :ok
 
-          _ = Tracker.create_comment(issue.id, @planner_failure_comment)
-          _ = Tracker.update_issue_state(issue.id, "Human Review")
+          planner_failed?(issue) ->
+            Logger.warning(
+              "Epic planner failure detected for #{issue_context(issue)}; escalating to Human Review"
+            )
+
+            case Tracker.create_comment(issue.id, @planner_failure_comment) do
+              :ok ->
+                :ok
+
+              {:error, reason} ->
+                Logger.warning(
+                  "Failed to comment escalation on #{issue.id}: #{inspect(reason)}"
+                )
+            end
+
+            case Tracker.update_issue_state(issue.id, "Human Review") do
+              :ok ->
+                :ok
+
+              {:error, reason} ->
+                Logger.error(
+                  "Failed to update state on #{issue.id} during escalation: #{inspect(reason)}"
+                )
+            end
+
+          true ->
+            :ok
         end
 
       _ ->

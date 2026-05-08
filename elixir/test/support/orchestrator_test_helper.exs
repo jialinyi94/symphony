@@ -41,6 +41,25 @@ defmodule SymphonyElixir.OrchestratorTestHelper do
     end
   end
 
+  @doc """
+  Inject a fake entry into the orchestrator's `running` map so tests can
+  simulate an in-flight worker for `issue_id`. Uses `:sys.replace_state/2`
+  to mutate the live GenServer state synchronously.
+  """
+  def set_running(issue_id, metadata \\ %{}) when is_binary(issue_id) and is_map(metadata) do
+    case Process.whereis(Orchestrator) do
+      pid when is_pid(pid) ->
+        :sys.replace_state(pid, fn state ->
+          %{state | running: Map.put(state.running, issue_id, metadata)}
+        end)
+
+        :ok
+
+      nil ->
+        raise "Orchestrator GenServer is not running"
+    end
+  end
+
   defmodule StubAgentRunner do
     @moduledoc false
 

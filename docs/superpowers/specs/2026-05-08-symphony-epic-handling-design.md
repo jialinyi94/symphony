@@ -162,17 +162,30 @@ A child's `blocked_by` entries take the existing shape `[%{state: blocker_state}
 
 This avoids per-child round-trips in the common case.
 
-### 6.4 Epic state mapping — `GitHub.StateMapping`
+### 6.4 Epic state mapping — `GitHub.StateMapping` + `GitHub.Adapter`
 
 Add the new label↔state pair:
 
-| Label | State name | In `active_states`? | In `terminal_states`? |
-|---|---|---|---|
-| `symphony:epic-tracking` | `Epic Tracking` (or similar) | **No** | **No** |
+| Label | State name | In `active_states`? | In `terminal_states`? | GitHub issue state |
+|---|---|---|---|---|
+| `symphony:epic-tracking` | `Epic Tracking` | **Yes** | **No** | `open` |
 
-The state being neither active nor terminal means: orchestrator's polling won't redispatch it (good — planner already ran), but the parent isn't considered "done" until the reaper closes it.
+Why active rather than "neither": `StateMapping.state_from_labels/4` (`state_mapping.ex:67-78`) requires the decoded state name to be in `active_states ∪ terminal_states`, otherwise it falls back to the first terminal state. Putting `Epic Tracking` in active_states satisfies the contract.
 
-`StateMapping.label_ops_for_state/2` must know that switching to `epic-tracking` removes `symphony:in-progress` and `symphony:todo`.
+Why active doesn't cause re-dispatch: `GitHub.Client.normalize_issue/3` sets `assigned_to_worker: false` whenever the decoded state is `Epic Tracking`. The orchestrator's `issue_routable_to_worker?/1` gate (`orchestrator.ex:608-612`) drops non-routable issues from candidates before any state check.
+
+Why GitHub stays open: `github_state_for/2` (`github/adapter.ex:69-71`) returns `:closed` only for states in `terminal_states`. Since `Epic Tracking` is active, the parent issue stays open until the reaper transitions it to `Done`.
+
+`StateMapping.label_ops_for_state/2` already removes every existing `symphony:*` label and adds the target — works for `Epic Tracking` without changes.
+
+Operators must add `Epic Tracking` to `tracker.active_states` in their workflow file. The required entry for `WORKFLOW.alpha.md` becomes:
+
+```yaml
+active_states:
+  - Todo
+  - In Progress
+  - Epic Tracking
+```
 
 ### 6.5 Planner prompt — `WORKFLOW.alpha.md` + `prompt_builder.ex`
 

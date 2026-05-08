@@ -9,6 +9,12 @@ defmodule SymphonyElixir.Orchestrator do
 
   alias SymphonyElixir.{AgentRunner, Config, Issue, StatusDashboard, Tracker, Workspace}
 
+  @planner_failure_comment """
+  Symphony's epic planner run did not produce a valid `<!-- symphony-plan:v1 -->` block on this issue.
+
+  Moving to Human Review for manual triage. To retry, remove the `symphony:human-review` label, re-add `symphony:todo`, and ensure GitHub sub-issues are configured.
+  """
+
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
@@ -224,9 +230,14 @@ defmodule SymphonyElixir.Orchestrator do
     state = reconcile_running_issues(state)
 
     with :ok <- Config.validate!(),
-         {:ok, issues} <- Tracker.fetch_candidate_issues(),
-         true <- available_slots(state) > 0 do
-      choose_issues(issues, state)
+         {:ok, issues} <- Tracker.fetch_candidate_issues() do
+      :ok = escalate_failed_planner_runs(issues)
+
+      if available_slots(state) > 0 do
+        choose_issues(issues, state)
+      else
+        state
+      end
     else
       {:error, :missing_linear_api_token} ->
         Logger.error("Linear API token missing in WORKFLOW.md")
@@ -264,9 +275,6 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
-        state
-
-      false ->
         state
     end
   end
@@ -690,8 +698,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
+    base_opts = [attempt: attempt, worker_host: worker_host]
+    run_opts = build_run_opts(issue, base_opts)
+    runner = agent_runner_module()
+
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
+           runner.run(issue, recipient, run_opts)
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
@@ -1065,6 +1077,86 @@ defmodule SymphonyElixir.Orchestrator do
     )
   end
 
+  defp agent_runner_module do
+    Application.get_env(:symphony_elixir, :agent_runner_module, AgentRunner)
+  end
+
+  defp build_run_opts(%Issue{} = issue, base_opts) do
+    case epic_classification(issue) do
+      {:epic, sub_numbers} ->
+        Keyword.merge(base_opts,
+          variant: :epic_planner,
+          max_turns: 4,
+          epic: %{sub_issue_numbers: sub_numbers}
+        )
+
+      :regular ->
+        base_opts
+    end
+  end
+
+  defp build_run_opts(_issue, base_opts), do: base_opts
+
+  defp epic_classification(%Issue{id: id, state: state})
+       when is_binary(id) and is_binary(state) do
+    if normalize_issue_state(state) == "epic tracking" do
+      :regular
+    else
+      case Tracker.fetch_sub_issues(id) do
+        {:ok, [_ | _] = numbers} -> {:epic, numbers}
+        _ -> :regular
+      end
+    end
+  end
+
+  defp epic_classification(_issue), do: :regular
+
+  defp escalate_failed_planner_runs(issues) when is_list(issues) do
+    Enum.each(issues, fn
+      %Issue{} = issue ->
+        if planner_failed?(issue) do
+          Logger.warning(
+            "Epic planner failure detected for #{issue_context(issue)}; escalating to Human Review"
+          )
+
+          _ = Tracker.create_comment(issue.id, @planner_failure_comment)
+          _ = Tracker.update_issue_state(issue.id, "Human Review")
+        end
+
+      _ ->
+        :ok
+    end)
+
+    :ok
+  end
+
+  defp planner_failed?(%Issue{id: id, state: state})
+       when is_binary(id) and is_binary(state) do
+    if normalize_issue_state(state) == "in progress" do
+      case Tracker.fetch_sub_issues(id) do
+        {:ok, [_ | _]} -> plan_invalid?(id)
+        _ -> false
+      end
+    else
+      false
+    end
+  end
+
+  defp planner_failed?(_issue), do: false
+
+  defp plan_invalid?(epic_id) do
+    case Tracker.fetch_plan(epic_id) do
+      {:ok, nil} -> true
+      {:ok, %{}} -> false
+      {:error, {:invalid_yaml, _}} -> true
+      {:error, {:missing_field, _}} -> true
+      {:error, {:invalid_sub_issue, _}} -> true
+      {:error, {:schema_mismatch, _}} -> true
+      {:error, _} -> false
+      _ -> false
+    end
+  end
+
   @spec request_refresh() :: map() | :unavailable
   def request_refresh do
     request_refresh(__MODULE__)
@@ -1166,6 +1258,12 @@ defmodule SymphonyElixir.Orchestrator do
        requested_at: DateTime.utc_now(),
        operations: ["poll", "reconcile"]
      }, state}
+  end
+
+  def handle_call(:force_tick, _from, state) do
+    state = refresh_runtime_config(state)
+    state = maybe_dispatch(state)
+    {:reply, :ok, state}
   end
 
   defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update) do

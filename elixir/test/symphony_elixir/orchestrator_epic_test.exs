@@ -204,4 +204,58 @@ defmodule SymphonyElixir.OrchestratorEpicTest do
       refute_receive {:memory_tracker_state_update, "400", _}, 200
     end
   end
+
+  describe "e2e: full epic flow" do
+    test "planner -> children dispatch in topo order -> reaper closes parent" do
+      epic = %SymphonyElixir.Issue{
+        id: "500", identifier: "500", title: "Epic", state: "Todo",
+        labels: ["symphony:todo"]
+      }
+      child_a = %SymphonyElixir.Issue{
+        id: "501", identifier: "501", title: "Child A", state: "Todo",
+        labels: ["symphony:todo"], blocked_by: []
+      }
+      child_b = %SymphonyElixir.Issue{
+        id: "502", identifier: "502", title: "Child B", state: "Todo",
+        labels: ["symphony:todo"], blocked_by: [%{state: "Todo"}]
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [epic, child_a, child_b])
+      Application.put_env(:symphony_elixir, :memory_tracker_sub_issues, %{"500" => [501, 502]})
+
+      # Tick 1: planner dispatch
+      SymphonyElixir.OrchestratorTestHelper.with_stubbed_agent_runner(fn ->
+        :ok = SymphonyElixir.OrchestratorTestHelper.tick()
+        assert_receive {:agent_run_invoked, "500", opts}, 500
+        assert opts[:variant] == :epic_planner
+      end)
+
+      # Simulate planner success: flip epic to Epic Tracking, inject plan
+      SymphonyElixir.OrchestratorTestHelper.simulate_planner_completion(
+        epic_id: "500",
+        plan: [%{id: 501, blocked_by: []}, %{id: 502, blocked_by: [501]}]
+      )
+
+      # Tick 2: child 501 dispatched (no blockers); 502 blocked
+      SymphonyElixir.OrchestratorTestHelper.with_stubbed_agent_runner(fn ->
+        :ok = SymphonyElixir.OrchestratorTestHelper.tick()
+        assert_receive {:agent_run_invoked, "501", _opts}, 500
+        refute_receive {:agent_run_invoked, "502", _}, 200
+      end)
+
+      # Simulate 501 done; tick 3 should now dispatch 502
+      SymphonyElixir.OrchestratorTestHelper.set_state("501", "Done")
+
+      SymphonyElixir.OrchestratorTestHelper.with_stubbed_agent_runner(fn ->
+        :ok = SymphonyElixir.OrchestratorTestHelper.tick()
+        assert_receive {:agent_run_invoked, "502", _opts}, 500
+      end)
+
+      # Simulate 502 done; tick 4 should reap parent
+      SymphonyElixir.OrchestratorTestHelper.set_state("502", "Done")
+
+      :ok = SymphonyElixir.OrchestratorTestHelper.tick()
+      assert_receive {:memory_tracker_state_update, "500", "Done"}, 500
+    end
+  end
 end

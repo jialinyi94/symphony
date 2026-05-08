@@ -18,6 +18,56 @@ defmodule SymphonyElixir.GitHub.ClientTest do
     |> Plug.Conn.resp(status, body)
   end
 
+  describe "fetch_issue_comments/1" do
+    setup do
+      bypass = Bypass.open()
+      prev = Application.get_env(:symphony_elixir, :github_api_base)
+      Application.put_env(:symphony_elixir, :github_api_base, "http://localhost:#{bypass.port}")
+
+      on_exit(fn ->
+        if prev do
+          Application.put_env(:symphony_elixir, :github_api_base, prev)
+        else
+          Application.delete_env(:symphony_elixir, :github_api_base)
+        end
+      end)
+
+      %{bypass: bypass}
+    end
+
+    test "returns comments with id, body, updated_at", %{bypass: bypass} do
+      write_workflow_file!(Workflow.workflow_file_path(), @github_overrides)
+
+      Bypass.expect_once(bypass, "GET", "/repos/owner/name/issues/133/comments", fn conn ->
+        json_resp(conn, 200, Jason.encode!([
+          %{"id" => 1, "body" => "first comment", "updated_at" => "2026-05-08T10:00:00Z"},
+          %{"id" => 2, "body" => "second comment", "updated_at" => "2026-05-08T11:00:00Z"}
+        ]))
+      end)
+
+      assert {:ok, comments} = Client.fetch_issue_comments("133")
+      assert [%{id: 1, body: "first comment"}, %{id: 2, body: "second comment"}] = comments
+      assert %DateTime{} = hd(comments).updated_at
+    end
+
+    test "paginates when needed", %{bypass: bypass} do
+      write_workflow_file!(Workflow.workflow_file_path(), @github_overrides)
+
+      page1 = for n <- 1..100, do: %{"id" => n, "body" => "c#{n}", "updated_at" => "2026-05-08T10:00:00Z"}
+      page2 = [%{"id" => 101, "body" => "c101", "updated_at" => "2026-05-08T11:00:00Z"}]
+
+      Bypass.expect(bypass, "GET", "/repos/owner/name/issues/133/comments", fn conn ->
+        conn = Plug.Conn.fetch_query_params(conn)
+        page = String.to_integer(conn.query_params["page"] || "1")
+        payload = if page == 1, do: page1, else: page2
+        json_resp(conn, 200, Jason.encode!(payload))
+      end)
+
+      assert {:ok, comments} = Client.fetch_issue_comments("133")
+      assert length(comments) == 101
+    end
+  end
+
   describe "fetch_sub_issues/1" do
     setup do
       bypass = Bypass.open()

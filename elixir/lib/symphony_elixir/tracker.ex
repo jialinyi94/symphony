@@ -22,11 +22,13 @@ defmodule SymphonyElixir.Tracker do
   @callback create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   @callback update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
 
+  @callback fetch_sub_issues(String.t()) :: {:ok, [integer()]} | {:error, term()}
+
   @callback kind() :: String.t()
   @callback validate_config(term()) :: :ok | {:error, term()}
   @callback secret_env_var() :: String.t() | nil
 
-  @optional_callbacks secret_env_var: 0
+  @optional_callbacks secret_env_var: 0, fetch_sub_issues: 1
 
   @spec adapters() :: [module()]
   def adapters, do: @adapters
@@ -79,6 +81,17 @@ defmodule SymphonyElixir.Tracker do
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
   def update_issue_state(issue_id, state_name) do
     with {:ok, mod} <- adapter(), do: mod.update_issue_state(issue_id, state_name)
+  end
+
+  @spec fetch_sub_issues(String.t()) :: {:ok, [integer()]} | {:error, term()}
+  def fetch_sub_issues(issue_id) do
+    with {:ok, mod} <- adapter() do
+      if function_exported?(mod, :fetch_sub_issues, 1) do
+        mod.fetch_sub_issues(issue_id)
+      else
+        {:ok, []}
+      end
+    end
   end
 
   @doc """

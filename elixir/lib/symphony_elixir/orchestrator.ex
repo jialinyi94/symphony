@@ -1117,72 +1117,74 @@ defmodule SymphonyElixir.Orchestrator do
   defp escalate_failed_planner_runs(issues, running)
        when is_list(issues) and is_map(running) do
     Enum.each(issues, fn
-      %Issue{} = issue ->
-        cond do
-          Map.has_key?(running, issue.id) ->
-            # Planner is mid-flight on a worker; do not escalate.
-            :ok
-
-          planner_failed?(issue) ->
-            Logger.warning(
-              "Epic planner failure detected for #{issue_context(issue)}; escalating to Human Review"
-            )
-
-            case Tracker.create_comment(issue.id, @planner_failure_comment) do
-              :ok ->
-                :ok
-
-              {:error, reason} ->
-                Logger.warning(
-                  "Failed to comment escalation on #{issue.id}: #{inspect(reason)}"
-                )
-            end
-
-            case Tracker.update_issue_state(issue.id, "Human Review") do
-              :ok ->
-                :ok
-
-              {:error, reason} ->
-                Logger.error(
-                  "Failed to update state on #{issue.id} during escalation: #{inspect(reason)}"
-                )
-            end
-
-          true ->
-            :ok
-        end
-
-      _ ->
-        :ok
+      %Issue{} = issue -> escalate_one(issue, running)
+      _ -> :ok
     end)
 
     :ok
   end
 
+  defp escalate_one(issue, running) do
+    cond do
+      Map.has_key?(running, issue.id) ->
+        # Planner is mid-flight on a worker; do not escalate.
+        :ok
+
+      planner_failed?(issue) ->
+        Logger.warning(
+          "Epic planner failure detected for #{issue_context(issue)}; escalating to Human Review"
+        )
+
+        escalate_to_human_review(issue)
+
+      true ->
+        :ok
+    end
+  end
+
+  defp escalate_to_human_review(issue) do
+    case Tracker.create_comment(issue.id, @planner_failure_comment) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to comment escalation on #{issue.id}: #{inspect(reason)}")
+    end
+
+    case Tracker.update_issue_state(issue.id, "Human Review") do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error(
+          "Failed to update state on #{issue.id} during escalation: #{inspect(reason)}"
+        )
+    end
+  end
+
   defp run_epic_reaper(issues) do
     epics = Enum.filter(issues, &(&1.state == "Epic Tracking"))
+    Enum.each(epics, &maybe_reap_epic(&1, issues))
+  end
 
-    Enum.each(epics, fn epic ->
-      case Tracker.fetch_sub_issues(epic.id) do
-        {:ok, [_ | _] = sub_numbers} ->
-          if all_children_done?(sub_numbers, issues) do
-            Logger.info("Epic reaper: closing #{issue_context(epic)} (all children Done)")
+  defp maybe_reap_epic(epic, issues) do
+    case Tracker.fetch_sub_issues(epic.id) do
+      {:ok, [_ | _] = sub_numbers} -> reap_if_done(epic, sub_numbers, issues)
+      _ -> :ok
+    end
+  end
 
-            case Tracker.update_issue_state(epic.id, "Done") do
-              :ok ->
-                :ok
+  defp reap_if_done(epic, sub_numbers, issues) do
+    if all_children_done?(sub_numbers, issues) do
+      Logger.info("Epic reaper: closing #{issue_context(epic)} (all children Done)")
 
-              {:error, reason} ->
-                Logger.warning("Epic reaper: failed to close #{epic.id}: #{inspect(reason)}")
-            end
-          else
-            :ok
-          end
-
-        _ ->
-          :ok
+      case Tracker.update_issue_state(epic.id, "Done") do
+        :ok -> :ok
+        {:error, reason} -> Logger.warning("Epic reaper: failed to close #{epic.id}: #{inspect(reason)}")
       end
-    end)
+    else
+      :ok
+    end
   end
 
   defp all_children_done?(sub_numbers, issues) do

@@ -70,6 +70,7 @@ defmodule SymphonyElixir.PromptBuilderTest do
     default
     """)
 
-    assert "P 1 2." <> _ = PromptBuilder.build_prompt(issue(), variant: :epic_planner, epic: %{sub_issue_numbers: [1, 2]}, attempt: 1)
+    result = PromptBuilder.build_prompt(issue(), variant: :epic_planner, epic: %{sub_issue_numbers: [1, 2]}, attempt: 1)
+    assert "P 1 2." <> _ = result
   end
 end

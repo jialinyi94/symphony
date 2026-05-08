@@ -2,8 +2,8 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
   use ExUnit.Case, async: false
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.{Workflow}
   alias SymphonyElixir.GitHub.{Adapter, ClientStub}
+  alias SymphonyElixir.Workflow
 
   setup do
     write_workflow_file!(Workflow.workflow_file_path(),

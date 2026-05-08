@@ -5,6 +5,7 @@ defmodule SymphonyElixir.OrchestratorTestHelper do
   to the test process recorded via `:memory_tracker_recipient`.
   """
 
+  alias SymphonyElixir.GitHub.StateMapping
   alias SymphonyElixir.Orchestrator
 
   @doc """
@@ -121,7 +122,7 @@ defmodule SymphonyElixir.OrchestratorTestHelper do
       Keyword.get(
         opts,
         :labels_for_state,
-        [SymphonyElixir.GitHub.StateMapping.state_to_label(new_state)]
+        [StateMapping.state_to_label(new_state)]
       )
 
     updated_issues =
@@ -158,18 +159,16 @@ defmodule SymphonyElixir.OrchestratorTestHelper do
   # Returns a list of %{state: blocker_state} maps for a given issue_id,
   # derived from all plans in the plans map.
   defp blockers_for_issue(issue_id, plans, state_by_id) do
-    plans
-    |> Enum.flat_map(fn {_epic_id, plan} ->
-      case Enum.find(plan.sub_issues, &(Integer.to_string(&1.id) == issue_id)) do
-        nil ->
-          []
-
-        %{blocked_by: blocker_ids} ->
-          Enum.map(blocker_ids, fn n ->
-            %{state: Map.get(state_by_id, Integer.to_string(n), "Todo")}
-          end)
-      end
+    Enum.flat_map(plans, fn {_epic_id, plan} ->
+      blockers_from_plan(issue_id, plan, state_by_id)
     end)
+  end
+
+  defp blockers_from_plan(issue_id, plan, state_by_id) do
+    case Enum.find(plan.sub_issues, &(Integer.to_string(&1.id) == issue_id)) do
+      nil -> []
+      %{blocked_by: blocker_ids} -> Enum.map(blocker_ids, &%{state: Map.get(state_by_id, Integer.to_string(&1), "Todo")})
+    end
   end
 
   defmodule StubAgentRunner do

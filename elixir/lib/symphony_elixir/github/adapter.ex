@@ -9,7 +9,7 @@ defmodule SymphonyElixir.GitHub.Adapter do
 
   @behaviour SymphonyElixir.Tracker
 
-  alias SymphonyElixir.{Config, GitHub.Client, GitHub.StateMapping}
+  alias SymphonyElixir.{Config, GitHub.Client, GitHub.EpicPlan, GitHub.StateMapping}
 
   @impl true
   def kind, do: "github"
@@ -34,7 +34,7 @@ defmodule SymphonyElixir.GitHub.Adapter do
   @impl true
   def fetch_plan(epic_id) when is_binary(epic_id) do
     with {:ok, comments} <- client_module().fetch_issue_comments(epic_id) do
-      case SymphonyElixir.GitHub.EpicPlan.extract(comments) do
+      case EpicPlan.extract(comments) do
         {:ok, plan} -> {:ok, plan}
         {:error, :no_plan} -> {:ok, nil}
         {:error, _reason} = err -> err
@@ -84,15 +84,14 @@ defmodule SymphonyElixir.GitHub.Adapter do
 
   defp blockers_for_epic(epic, state_by_number) do
     case fetch_plan(epic.id) do
-      {:ok, %{sub_issues: subs}} ->
-        Enum.map(subs, fn sub ->
-          blockers = Enum.map(sub.blocked_by, fn n -> %{state: Map.get(state_by_number, n, "Todo")} end)
-          {Integer.to_string(sub.id), blockers}
-        end)
-
-      _ ->
-        []
+      {:ok, %{sub_issues: subs}} -> Enum.map(subs, &sub_to_blocker_entry(&1, state_by_number))
+      _ -> []
     end
+  end
+
+  defp sub_to_blocker_entry(sub, state_by_number) do
+    blockers = Enum.map(sub.blocked_by, &%{state: Map.get(state_by_number, &1, "Todo")})
+    {Integer.to_string(sub.id), blockers}
   end
 
   @impl true

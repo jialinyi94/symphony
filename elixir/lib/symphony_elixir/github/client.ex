@@ -215,6 +215,7 @@ defmodule SymphonyElixir.GitHub.Client do
   defp normalize_issue(raw, active_states, terminal_states) when is_map(raw) do
     labels = extract_labels(raw)
     github_state = raw["state"] || "open"
+    state_name = StateMapping.state_from_labels(labels, github_state, active_states, terminal_states)
 
     %Issue{
       id: to_string(raw["number"]),
@@ -222,16 +223,19 @@ defmodule SymphonyElixir.GitHub.Client do
       title: raw["title"],
       description: raw["body"],
       priority: nil,
-      state: StateMapping.state_from_labels(labels, github_state, active_states, terminal_states),
+      state: state_name,
       branch_name: nil,
       url: raw["html_url"],
       assignee_id: get_in(raw, ["assignee", "login"]),
       labels: labels,
-      assigned_to_worker: true,
+      assigned_to_worker: assigned_to_worker_for_state(state_name),
       created_at: parse_datetime(raw["created_at"]),
       updated_at: parse_datetime(raw["updated_at"])
     }
   end
+
+  defp assigned_to_worker_for_state("Epic Tracking"), do: false
+  defp assigned_to_worker_for_state(_), do: true
 
   defp extract_labels(%{"labels" => labels}) when is_list(labels) do
     labels

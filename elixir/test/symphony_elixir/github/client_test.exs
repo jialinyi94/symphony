@@ -139,4 +139,72 @@ defmodule SymphonyElixir.GitHub.ClientTest do
       assert {:error, {:github_http_error, 404, _}} = Client.fetch_sub_issues("133")
     end
   end
+
+  describe "normalize_issue (via fetch_candidate_issues)" do
+    setup do
+      bypass = Bypass.open()
+      prev = Application.get_env(:symphony_elixir, :github_api_base)
+      Application.put_env(:symphony_elixir, :github_api_base, "http://localhost:#{bypass.port}")
+
+      on_exit(fn ->
+        if prev do
+          Application.put_env(:symphony_elixir, :github_api_base, prev)
+        else
+          Application.delete_env(:symphony_elixir, :github_api_base)
+        end
+      end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "github",
+        tracker_repo: "owner/name",
+        tracker_api_token: "test",
+        tracker_active_states: ["Todo", "In Progress", "Epic Tracking"],
+        tracker_terminal_states: ["Human Review", "Done"]
+      )
+
+      %{bypass: bypass}
+    end
+
+    test "Epic Tracking issues get assigned_to_worker: false", %{bypass: bypass} do
+      Bypass.expect_once(bypass, "GET", "/repos/owner/name/issues", fn conn ->
+        json_resp(conn, 200, Jason.encode!([
+          %{
+            "number" => 1,
+            "title" => "epic",
+            "body" => "",
+            "state" => "open",
+            "html_url" => "https://x",
+            "labels" => [%{"name" => "symphony:epic-tracking"}],
+            "created_at" => "2026-05-08T10:00:00Z",
+            "updated_at" => "2026-05-08T10:00:00Z"
+          }
+        ]))
+      end)
+
+      {:ok, [issue]} = Client.fetch_candidate_issues()
+      assert issue.state == "Epic Tracking"
+      assert issue.assigned_to_worker == false
+    end
+
+    test "non-Epic Tracking issues retain assigned_to_worker: true", %{bypass: bypass} do
+      Bypass.expect_once(bypass, "GET", "/repos/owner/name/issues", fn conn ->
+        json_resp(conn, 200, Jason.encode!([
+          %{
+            "number" => 2,
+            "title" => "regular",
+            "body" => "",
+            "state" => "open",
+            "html_url" => "https://x",
+            "labels" => [%{"name" => "symphony:todo"}],
+            "created_at" => "2026-05-08T10:00:00Z",
+            "updated_at" => "2026-05-08T10:00:00Z"
+          }
+        ]))
+      end)
+
+      {:ok, [issue]} = Client.fetch_candidate_issues()
+      assert issue.state == "Todo"
+      assert issue.assigned_to_worker == true
+    end
+  end
 end

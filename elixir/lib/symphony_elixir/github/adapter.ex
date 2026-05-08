@@ -32,10 +32,68 @@ defmodule SymphonyElixir.GitHub.Adapter do
   end
 
   @impl true
-  def fetch_candidate_issues, do: client_module().fetch_candidate_issues()
+  def fetch_plan(epic_id) when is_binary(epic_id) do
+    with {:ok, comments} <- client_module().fetch_issue_comments(epic_id) do
+      case SymphonyElixir.GitHub.EpicPlan.extract(comments) do
+        {:ok, plan} -> {:ok, plan}
+        {:error, :no_plan} -> {:ok, nil}
+        {:error, _reason} = err -> err
+      end
+    end
+  end
 
   @impl true
-  def fetch_issues_by_states(states), do: client_module().fetch_issues_by_states(states)
+  def fetch_candidate_issues do
+    with {:ok, raw_issues} <- client_module().fetch_candidate_issues() do
+      {:ok, populate_blocked_by_from_plans(raw_issues)}
+    end
+  end
+
+  @impl true
+  def fetch_issues_by_states(states) do
+    with {:ok, raw_issues} <- client_module().fetch_issues_by_states(states) do
+      {:ok, populate_blocked_by_from_plans(raw_issues)}
+    end
+  end
+
+  defp populate_blocked_by_from_plans(issues) do
+    state_by_number =
+      issues
+      |> Enum.into(%{}, fn issue ->
+        case Integer.parse(issue.id || "") do
+          {n, _} -> {n, issue.state}
+          :error -> {nil, issue.state}
+        end
+      end)
+      |> Map.delete(nil)
+
+    epics = Enum.filter(issues, &(&1.state == "Epic Tracking"))
+
+    blockers_by_child =
+      epics
+      |> Enum.flat_map(fn epic -> blockers_for_epic(epic, state_by_number) end)
+      |> Enum.into(%{})
+
+    Enum.map(issues, fn issue ->
+      case Map.get(blockers_by_child, issue.id) do
+        nil -> issue
+        blockers -> %{issue | blocked_by: blockers}
+      end
+    end)
+  end
+
+  defp blockers_for_epic(epic, state_by_number) do
+    case fetch_plan(epic.id) do
+      {:ok, %{sub_issues: subs}} ->
+        Enum.map(subs, fn sub ->
+          blockers = Enum.map(sub.blocked_by, fn n -> %{state: Map.get(state_by_number, n, "Todo")} end)
+          {Integer.to_string(sub.id), blockers}
+        end)
+
+      _ ->
+        []
+    end
+  end
 
   @impl true
   def fetch_issue_states_by_ids(issue_ids), do: client_module().fetch_issue_states_by_ids(issue_ids)

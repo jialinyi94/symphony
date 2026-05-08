@@ -23,12 +23,13 @@ defmodule SymphonyElixir.Tracker do
   @callback update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
 
   @callback fetch_sub_issues(String.t()) :: {:ok, [integer()]} | {:error, term()}
+  @callback fetch_plan(String.t()) :: {:ok, map() | nil} | {:error, term()}
 
   @callback kind() :: String.t()
   @callback validate_config(term()) :: :ok | {:error, term()}
   @callback secret_env_var() :: String.t() | nil
 
-  @optional_callbacks secret_env_var: 0, fetch_sub_issues: 1
+  @optional_callbacks secret_env_var: 0, fetch_sub_issues: 1, fetch_plan: 1
 
   @spec adapters() :: [module()]
   def adapters, do: @adapters
@@ -90,6 +91,17 @@ defmodule SymphonyElixir.Tracker do
         mod.fetch_sub_issues(issue_id)
       else
         {:ok, []}
+      end
+    end
+  end
+
+  @spec fetch_plan(String.t()) :: {:ok, map() | nil} | {:error, term()}
+  def fetch_plan(epic_id) do
+    with {:ok, mod} <- adapter() do
+      if function_exported?(mod, :fetch_plan, 1) do
+        mod.fetch_plan(epic_id)
+      else
+        {:ok, nil}
       end
     end
   end

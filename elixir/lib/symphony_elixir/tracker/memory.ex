@@ -59,6 +59,12 @@ defmodule SymphonyElixir.Tracker.Memory do
     {:ok, Map.get(map, parent_id, [])}
   end
 
+  @impl true
+  def fetch_plan(epic_id) when is_binary(epic_id) do
+    plans = Application.get_env(:symphony_elixir, :memory_tracker_plans, %{})
+    {:ok, Map.get(plans, epic_id)}
+  end
+
   defp configured_issues do
     Application.get_env(:symphony_elixir, :memory_tracker_issues, [])
   end

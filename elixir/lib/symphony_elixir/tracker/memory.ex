@@ -15,7 +15,23 @@ defmodule SymphonyElixir.Tracker.Memory do
 
   @impl true
   def fetch_candidate_issues do
-    {:ok, issue_entries()}
+    # When this flag is set, mimic GitHub's `state: "open"` semantics by
+    # dropping Done-state issues from the candidate list while still leaving
+    # them visible to `fetch_issue_states_by_ids/1`. Used by tests that
+    # exercise the reaper / blocker code paths under GitHub-like conditions.
+    drop_done? =
+      Application.get_env(:symphony_elixir, :memory_tracker_drop_done_from_candidates, false)
+
+    entries = issue_entries()
+
+    filtered =
+      if drop_done? do
+        Enum.reject(entries, fn issue -> issue.state == "Done" end)
+      else
+        entries
+      end
+
+    {:ok, filtered}
   end
 
   @impl true

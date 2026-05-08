@@ -1169,13 +1169,46 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp maybe_reap_epic(epic, issues) do
     case Tracker.fetch_sub_issues(epic.id) do
-      {:ok, [_ | _] = sub_numbers} -> reap_if_done(epic, sub_numbers, issues)
-      _ -> :ok
+      {:ok, [_ | _] = sub_numbers} ->
+        state_by_id = build_state_by_id(issues, sub_numbers)
+        reap_if_done(epic, sub_numbers, state_by_id)
+
+      _ ->
+        :ok
     end
   end
 
-  defp reap_if_done(epic, sub_numbers, issues) do
-    if all_children_done?(sub_numbers, issues) do
+  # Builds a map from sub-issue identifier (string) to state, augmenting the
+  # candidate `issues` list with any sub_numbers missing from it. Children that
+  # have already been closed (Done) won't appear in `fetch_candidate_issues`
+  # because GitHub's API request filters by `state: "open"`, so we must look
+  # them up explicitly via `fetch_issue_states_by_ids/1` to avoid the reaper
+  # missing the all-children-Done condition.
+  defp build_state_by_id(issues, sub_numbers) do
+    in_list = Map.new(issues, &{&1.identifier, &1.state})
+    missing = Enum.reject(sub_numbers, fn n -> Map.has_key?(in_list, Integer.to_string(n)) end)
+
+    if missing == [] do
+      in_list
+    else
+      merge_fetched_child_states(in_list, missing)
+    end
+  end
+
+  defp merge_fetched_child_states(in_list, missing) do
+    case Tracker.fetch_issue_states_by_ids(Enum.map(missing, &Integer.to_string/1)) do
+      {:ok, fetched} ->
+        Enum.reduce(fetched, in_list, fn issue, acc ->
+          Map.put(acc, issue.identifier, issue.state)
+        end)
+
+      _ ->
+        in_list
+    end
+  end
+
+  defp reap_if_done(epic, sub_numbers, state_by_id) do
+    if all_children_done?(sub_numbers, state_by_id) do
       Logger.info("Epic reaper: closing #{issue_context(epic)} (all children Done)")
 
       case Tracker.update_issue_state(epic.id, "Done") do
@@ -1187,11 +1220,9 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp all_children_done?(sub_numbers, issues) do
-    by_id = Map.new(issues, &{&1.identifier, &1.state})
-
+  defp all_children_done?(sub_numbers, state_by_id) do
     Enum.all?(sub_numbers, fn n ->
-      Map.get(by_id, Integer.to_string(n)) == "Done"
+      Map.get(state_by_id, Integer.to_string(n)) == "Done"
     end)
   end
 

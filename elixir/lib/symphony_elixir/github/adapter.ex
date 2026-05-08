@@ -57,21 +57,24 @@ defmodule SymphonyElixir.GitHub.Adapter do
   end
 
   defp populate_blocked_by_from_plans(issues) do
-    state_by_number =
-      issues
-      |> Enum.into(%{}, fn issue ->
-        case Integer.parse(issue.id || "") do
-          {n, _} -> {n, issue.state}
-          :error -> {nil, issue.state}
-        end
-      end)
-      |> Map.delete(nil)
-
+    state_by_number = build_state_by_number(issues)
     epics = Enum.filter(issues, &(&1.state == "Epic Tracking"))
+
+    # Cache the plan once per epic so we don't double-fetch (once for blocker
+    # discovery, once for blocker computation).
+    plans_by_epic = Enum.into(epics, %{}, fn epic -> {epic.id, fetch_plan_safe(epic.id)} end)
+
+    # Augment state_by_number with any plan-referenced ids that are not in
+    # `issues` (e.g., Done children that have been closed and dropped from
+    # the open candidate list returned by GitHub's `state: "open"` filter).
+    augmented_state_by_number =
+      augment_with_terminal_states(plans_by_epic, state_by_number)
 
     blockers_by_child =
       epics
-      |> Enum.flat_map(fn epic -> blockers_for_epic(epic, state_by_number) end)
+      |> Enum.flat_map(fn epic ->
+        blockers_for_epic(plans_by_epic[epic.id], augmented_state_by_number)
+      end)
       |> Enum.into(%{})
 
     Enum.map(issues, fn issue ->
@@ -82,11 +85,64 @@ defmodule SymphonyElixir.GitHub.Adapter do
     end)
   end
 
-  defp blockers_for_epic(epic, state_by_number) do
-    case fetch_plan(epic.id) do
-      {:ok, %{sub_issues: subs}} -> Enum.map(subs, &sub_to_blocker_entry(&1, state_by_number))
-      _ -> []
+  defp build_state_by_number(issues) do
+    issues
+    |> Enum.into(%{}, fn issue ->
+      case Integer.parse(issue.id || "") do
+        {n, _} -> {n, issue.state}
+        :error -> {nil, issue.state}
+      end
+    end)
+    |> Map.delete(nil)
+  end
+
+  defp fetch_plan_safe(epic_id) do
+    case fetch_plan(epic_id) do
+      {:ok, %{sub_issues: _} = plan} -> plan
+      _ -> nil
     end
+  end
+
+  defp augment_with_terminal_states(plans_by_epic, state_by_number) do
+    referenced_ids =
+      plans_by_epic
+      |> Map.values()
+      |> Enum.flat_map(&plan_referenced_ids/1)
+      |> Enum.uniq()
+
+    missing_ids = Enum.reject(referenced_ids, &Map.has_key?(state_by_number, &1))
+
+    if missing_ids == [] do
+      state_by_number
+    else
+      merge_fetched_states(state_by_number, missing_ids)
+    end
+  end
+
+  defp merge_fetched_states(state_by_number, missing_ids) do
+    case client_module().fetch_issue_states_by_ids(Enum.map(missing_ids, &Integer.to_string/1)) do
+      {:ok, fetched} -> Enum.reduce(fetched, state_by_number, &put_state_by_number/2)
+      _ -> state_by_number
+    end
+  end
+
+  defp put_state_by_number(issue, acc) do
+    case Integer.parse(issue.id || "") do
+      {n, _} -> Map.put(acc, n, issue.state)
+      :error -> acc
+    end
+  end
+
+  defp plan_referenced_ids(nil), do: []
+
+  defp plan_referenced_ids(%{sub_issues: subs}) do
+    Enum.flat_map(subs, fn sub -> [sub.id | sub.blocked_by] end)
+  end
+
+  defp blockers_for_epic(nil, _state_by_number), do: []
+
+  defp blockers_for_epic(%{sub_issues: subs}, state_by_number) do
+    Enum.map(subs, &sub_to_blocker_entry(&1, state_by_number))
   end
 
   defp sub_to_blocker_entry(sub, state_by_number) do

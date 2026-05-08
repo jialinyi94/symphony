@@ -93,6 +93,64 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
       assert [%{state: "Done"}] = by_id["135"].blocked_by
     end
 
+    test "blocker child that has been Done & dropped from candidates is fetched via fetch_issue_states_by_ids" do
+      epic =
+        ClientStub.sample_issue(
+          id: "100",
+          state: "Epic Tracking",
+          assigned_to_worker: false,
+          labels: ["symphony:epic-tracking"]
+        )
+
+      # Note: child134 (Done) is NOT in fetch_candidate_issues result —
+      # simulating GitHub's "open only" filter on the candidates query.
+      child135 =
+        ClientStub.sample_issue(
+          id: "135",
+          identifier: "135",
+          state: "Todo",
+          labels: ["symphony:todo"]
+        )
+
+      plan_body = """
+      <!-- symphony-plan:v1 -->
+      schema: 1
+      sub_issues:
+        - id: 134
+          blocked_by: []
+        - id: 135
+          blocked_by: [134]
+      <!-- /symphony-plan -->
+      """
+
+      ClientStub.set(:fetch_candidate_issues, {:ok, [epic, child135]})
+      ClientStub.set(:fetch_sub_issues, {:ok, [134, 135]})
+
+      ClientStub.set(
+        :fetch_issue_comments,
+        {:ok, [%{id: 1, body: plan_body, updated_at: ~U[2026-05-08 12:00:00Z]}]}
+      )
+
+      # Stub: when adapter looks up #134 (which is missing from candidates),
+      # return it as Done so the blocker on #135 reflects terminal state.
+      ClientStub.set(
+        :fetch_issue_states_by_ids,
+        {:ok,
+         [
+           ClientStub.sample_issue(
+             id: "134",
+             identifier: "134",
+             state: "Done",
+             labels: ["symphony:done"]
+           )
+         ]}
+      )
+
+      {:ok, issues} = Adapter.fetch_candidate_issues()
+      by_id = Map.new(issues, &{&1.id, &1})
+      assert [%{state: "Done"}] = by_id["135"].blocked_by
+    end
+
     test "non-epic candidates pass through with blocked_by unchanged" do
       # Sanity check: when there's no epic in the candidates, fetch_candidate_issues
       # behaves identically to the wrapped Client call (no blocked_by mutation).

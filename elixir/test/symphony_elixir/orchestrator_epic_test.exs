@@ -193,6 +193,44 @@ defmodule SymphonyElixir.OrchestratorEpicTest do
       refute_receive {:memory_tracker_state_update, "300", _}, 200
     end
 
+    test "reaper closes parent even when Done children have dropped from candidate list (GitHub semantics)" do
+      Application.put_env(:symphony_elixir, :memory_tracker_drop_done_from_candidates, true)
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :memory_tracker_drop_done_from_candidates) end)
+
+      epic = %SymphonyElixir.Issue{
+        id: "200",
+        identifier: "200",
+        title: "Epic",
+        state: "Epic Tracking",
+        labels: ["symphony:epic-tracking"]
+      }
+
+      done_a = %SymphonyElixir.Issue{
+        id: "201",
+        identifier: "201",
+        title: "A",
+        state: "Done",
+        labels: ["symphony:done"]
+      }
+
+      done_b = %SymphonyElixir.Issue{
+        id: "202",
+        identifier: "202",
+        title: "B",
+        state: "Done",
+        labels: ["symphony:done"]
+      }
+
+      # Both Done children remain in :memory_tracker_issues (so
+      # fetch_issue_states_by_ids finds them), but fetch_candidate_issues
+      # filters them out — mimicking GitHub `state: "open"` semantics.
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [epic, done_a, done_b])
+      Application.put_env(:symphony_elixir, :memory_tracker_sub_issues, %{"200" => [201, 202]})
+
+      :ok = SymphonyElixir.OrchestratorTestHelper.tick()
+      assert_receive {:memory_tracker_state_update, "200", "Done"}, 500
+    end
+
     test "does NOT close parent if a child is in Human Review (PR not merged)" do
       epic = %SymphonyElixir.Issue{id: "400", identifier: "400", title: "Epic", state: "Epic Tracking"}
       human_review = %SymphonyElixir.Issue{id: "401", identifier: "401", state: "Human Review"}

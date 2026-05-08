@@ -27,6 +27,11 @@ defmodule SymphonyElixir.GitHub.Adapter do
   end
 
   @impl true
+  def fetch_sub_issues(issue_id) when is_binary(issue_id) do
+    client_module().fetch_sub_issues(issue_id)
+  end
+
+  @impl true
   def fetch_candidate_issues, do: client_module().fetch_candidate_issues()
 
   @impl true

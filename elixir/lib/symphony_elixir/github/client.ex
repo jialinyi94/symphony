@@ -86,11 +86,12 @@ defmodule SymphonyElixir.GitHub.Client do
     case Req.get(url, headers: headers, params: full_params, connect_options: [timeout: 30_000]) do
       {:ok, %{status: 200, body: body}} when is_list(body) ->
         normalized = Enum.map(body, &normalize_comment/1)
+        new_acc = acc ++ normalized
 
         if length(body) < @per_page do
-          {:ok, Enum.reverse(acc) ++ normalized}
+          {:ok, new_acc}
         else
-          do_paginate_comments(url, headers, params, page + 1, acc ++ normalized)
+          do_paginate_comments(url, headers, params, page + 1, new_acc)
         end
 
       {:ok, response} ->

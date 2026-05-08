@@ -65,6 +65,24 @@ defmodule SymphonyElixir.GitHub.ClientTest do
 
       assert {:ok, comments} = Client.fetch_issue_comments("133")
       assert length(comments) == 101
+      assert Enum.map(comments, & &1.id) == Enum.to_list(1..101)
+    end
+
+    test "preserves order when last page is partial (2-page)", %{bypass: bypass} do
+      write_workflow_file!(Workflow.workflow_file_path(), @github_overrides)
+
+      page1 = for n <- 1..100, do: %{"id" => n, "body" => "c#{n}", "updated_at" => "2026-05-08T10:00:00Z"}
+      page2 = for n <- 101..150, do: %{"id" => n, "body" => "c#{n}", "updated_at" => "2026-05-08T10:00:00Z"}
+
+      Bypass.expect(bypass, "GET", "/repos/owner/name/issues/133/comments", fn conn ->
+        conn = Plug.Conn.fetch_query_params(conn)
+        page = String.to_integer(conn.query_params["page"] || "1")
+        payload = if page == 1, do: page1, else: page2
+        json_resp(conn, 200, Jason.encode!(payload))
+      end)
+
+      assert {:ok, comments} = Client.fetch_issue_comments("133")
+      assert Enum.map(comments, & &1.id) == Enum.to_list(1..150)
     end
   end
 

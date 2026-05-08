@@ -26,8 +26,8 @@ defmodule SymphonyElixir.GitHub.ClientStub do
 
   @spec lookup!(atom()) :: term()
   defp lookup!(key) do
-    case Process.get({__MODULE__, key}) do
-      nil -> raise "ClientStub: no response configured for #{inspect(key)}"
+    case Process.get({__MODULE__, key}, :__client_stub_unset__) do
+      :__client_stub_unset__ -> raise "ClientStub: no response configured for #{inspect(key)}"
       value -> value
     end
   end

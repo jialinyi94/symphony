@@ -19,9 +19,23 @@ defmodule SymphonyElixir.GitHub.ClientTest do
   end
 
   describe "fetch_sub_issues/1" do
-    test "returns the parsed list of issue numbers from a 200 response" do
+    setup do
       bypass = Bypass.open()
+      prev = Application.get_env(:symphony_elixir, :github_api_base)
       Application.put_env(:symphony_elixir, :github_api_base, "http://localhost:#{bypass.port}")
+
+      on_exit(fn ->
+        if prev do
+          Application.put_env(:symphony_elixir, :github_api_base, prev)
+        else
+          Application.delete_env(:symphony_elixir, :github_api_base)
+        end
+      end)
+
+      %{bypass: bypass}
+    end
+
+    test "returns the parsed list of issue numbers from a 200 response", %{bypass: bypass} do
       write_workflow_file!(Workflow.workflow_file_path(), @github_overrides)
 
       Bypass.expect_once(bypass, "GET", "/repos/owner/name/issues/133/sub_issues", fn conn ->
@@ -37,9 +51,7 @@ defmodule SymphonyElixir.GitHub.ClientTest do
       assert {:ok, [134, 135]} = Client.fetch_sub_issues("133")
     end
 
-    test "returns empty list when GitHub returns 200 with []" do
-      bypass = Bypass.open()
-      Application.put_env(:symphony_elixir, :github_api_base, "http://localhost:#{bypass.port}")
+    test "returns empty list when GitHub returns 200 with []", %{bypass: bypass} do
       write_workflow_file!(Workflow.workflow_file_path(), @github_overrides)
 
       Bypass.expect_once(bypass, "GET", "/repos/owner/name/issues/133/sub_issues", fn conn ->
@@ -49,9 +61,7 @@ defmodule SymphonyElixir.GitHub.ClientTest do
       assert {:ok, []} = Client.fetch_sub_issues("133")
     end
 
-    test "returns error tuple on HTTP error" do
-      bypass = Bypass.open()
-      Application.put_env(:symphony_elixir, :github_api_base, "http://localhost:#{bypass.port}")
+    test "returns error tuple on HTTP error", %{bypass: bypass} do
       write_workflow_file!(Workflow.workflow_file_path(), @github_overrides)
 
       Bypass.expect_once(bypass, "GET", "/repos/owner/name/issues/133/sub_issues", fn conn ->

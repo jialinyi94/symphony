@@ -35,10 +35,35 @@ defmodule SymphonyElixir.GitHub.Adapter do
   def fetch_plan(epic_id) when is_binary(epic_id) do
     with {:ok, comments} <- client_module().fetch_issue_comments(epic_id) do
       case EpicPlan.extract(comments) do
-        {:ok, plan} -> {:ok, plan}
-        {:error, :no_plan} -> {:ok, nil}
-        {:error, _reason} = err -> err
+        {:ok, plan} ->
+          validate_plan_against_actual_sub_issues(plan, epic_id)
+
+        {:error, :no_plan} ->
+          {:ok, nil}
+
+        {:error, _reason} = err ->
+          err
       end
+    end
+  end
+
+  # Note: this calls `fetch_sub_issues` once per epic per polling tick on top of
+  # the candidate-list fetch and the orchestrator's epic_classification lookup.
+  # At single-digit-epics-per-repo scale this is fine; if it ever becomes a
+  # bottleneck, cache `fetch_sub_issues` results in the process dictionary for
+  # the duration of a single polling tick.
+  defp validate_plan_against_actual_sub_issues(plan, epic_id) do
+    case client_module().fetch_sub_issues(epic_id) do
+      {:ok, sub_numbers} ->
+        case EpicPlan.validate_against_sub_issues(plan, sub_numbers) do
+          :ok -> {:ok, plan}
+          {:error, _} = err -> err
+        end
+
+      {:error, _reason} = err ->
+        # If we can't fetch sub_issues to validate, propagate that error
+        # rather than silently accepting an unvalidated plan.
+        err
     end
   end
 

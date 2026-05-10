@@ -137,6 +137,28 @@ defmodule SymphonyElixir.OrchestratorEpicTest do
 
       assert_receive {:memory_tracker_state_update, "900", "Human Review"}, 500
     end
+
+    test "epic with plan referencing unknown id is escalated to Human Review" do
+      epic = %SymphonyElixir.Issue{
+        id: "950",
+        identifier: "950",
+        title: "Epic",
+        state: "In Progress",
+        labels: ["symphony:in-progress"]
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [epic])
+      Application.put_env(:symphony_elixir, :memory_tracker_sub_issues, %{"950" => [951]})
+
+      Application.put_env(
+        :symphony_elixir,
+        :memory_tracker_plan_errors,
+        %{"950" => {:plan_references_unknown_ids, [999]}}
+      )
+
+      :ok = SymphonyElixir.OrchestratorTestHelper.tick()
+      assert_receive {:memory_tracker_state_update, "950", "Human Review"}, 500
+    end
   end
 
   describe "epic tracking dispatch" do

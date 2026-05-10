@@ -163,4 +163,59 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
       assert {:ok, [^plain]} = Adapter.fetch_candidate_issues()
     end
   end
+
+  describe "fetch_plan/1 sub-issue validation" do
+    test "fetch_plan rejects a plan that references an unknown sub-issue id" do
+      bad_plan = """
+      <!-- symphony-plan:v1 -->
+      schema: 1
+      sub_issues:
+        - id: 134
+          blocked_by: []
+        - id: 999
+          blocked_by: []
+      <!-- /symphony-plan -->
+      """
+
+      ClientStub.set(:fetch_issue_comments, {:ok, [%{id: 1, body: bad_plan, updated_at: ~U[2026-05-10 12:00:00Z]}]})
+      ClientStub.set(:fetch_sub_issues, {:ok, [134]})
+
+      assert {:error, {:plan_references_unknown_ids, [999]}} = Adapter.fetch_plan("100")
+    end
+
+    test "fetch_plan rejects a plan that omits a real sub-issue" do
+      partial_plan = """
+      <!-- symphony-plan:v1 -->
+      schema: 1
+      sub_issues:
+        - id: 134
+          blocked_by: []
+      <!-- /symphony-plan -->
+      """
+
+      ClientStub.set(:fetch_issue_comments, {:ok, [%{id: 1, body: partial_plan, updated_at: ~U[2026-05-10 12:00:00Z]}]})
+      ClientStub.set(:fetch_sub_issues, {:ok, [134, 135]})
+
+      assert {:error, {:plan_missing_sub_issues, [135]}} = Adapter.fetch_plan("100")
+    end
+
+    test "fetch_plan accepts a plan whose ids exactly match the sub-issues" do
+      good_plan = """
+      <!-- symphony-plan:v1 -->
+      schema: 1
+      sub_issues:
+        - id: 134
+          blocked_by: []
+        - id: 135
+          blocked_by: [134]
+      <!-- /symphony-plan -->
+      """
+
+      ClientStub.set(:fetch_issue_comments, {:ok, [%{id: 1, body: good_plan, updated_at: ~U[2026-05-10 12:00:00Z]}]})
+      ClientStub.set(:fetch_sub_issues, {:ok, [134, 135]})
+
+      assert {:ok, plan} = Adapter.fetch_plan("100")
+      assert length(plan.sub_issues) == 2
+    end
+  end
 end

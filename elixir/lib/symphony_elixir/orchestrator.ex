@@ -1240,18 +1240,26 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp planner_failed?(_issue), do: false
 
+  @plan_invalid_error_tags [
+    :invalid_yaml,
+    :missing_field,
+    :invalid_sub_issue,
+    :schema_mismatch,
+    :plan_references_unknown_ids,
+    :plan_missing_sub_issues
+  ]
+
   defp plan_invalid?(epic_id) do
     case Tracker.fetch_plan(epic_id) do
       {:ok, nil} -> true
       {:ok, %{}} -> false
-      {:error, {:invalid_yaml, _}} -> true
-      {:error, {:missing_field, _}} -> true
-      {:error, {:invalid_sub_issue, _}} -> true
-      {:error, {:schema_mismatch, _}} -> true
-      {:error, _} -> false
+      {:error, reason} -> plan_error_invalid?(reason)
       _ -> false
     end
   end
+
+  defp plan_error_invalid?({tag, _}) when tag in @plan_invalid_error_tags, do: true
+  defp plan_error_invalid?(_), do: false
 
   @spec request_refresh() :: map() | :unavailable
   def request_refresh do

@@ -30,7 +30,8 @@ defmodule SymphonyElixir.Workflow do
   @type loaded_workflow :: %{
           config: map(),
           prompt: String.t(),
-          prompt_template: String.t()
+          prompt_template: String.t(),
+          prompts: %{atom() => String.t()}
         }
 
   @spec current() :: {:ok, loaded_workflow()} | {:error, term()}
@@ -71,7 +72,8 @@ defmodule SymphonyElixir.Workflow do
          %{
            config: front_matter,
            prompt: prompt,
-           prompt_template: prompt
+           prompt_template: prompt,
+           prompts: extract_named_prompts(front_matter)
          }}
 
       {:error, :workflow_front_matter_not_a_map} ->
@@ -81,6 +83,17 @@ defmodule SymphonyElixir.Workflow do
         {:error, {:workflow_parse_error, reason}}
     end
   end
+
+  defp extract_named_prompts(%{"prompts" => map}) when is_map(map) do
+    map
+    |> Enum.flat_map(fn
+      {key, value} when is_binary(key) and is_binary(value) -> [{String.to_atom(key), value}]
+      _ -> []
+    end)
+    |> Map.new()
+  end
+
+  defp extract_named_prompts(_), do: %{}
 
   defp split_front_matter(content) do
     lines = String.split(content, ~r/\R/, trim: false)
@@ -100,7 +113,7 @@ defmodule SymphonyElixir.Workflow do
   end
 
   defp front_matter_yaml_to_map(lines) do
-    yaml = Enum.join(lines, "\n")
+    yaml = Enum.join(lines, "\n") <> "\n"
 
     if String.trim(yaml) == "" do
       {:ok, %{}}

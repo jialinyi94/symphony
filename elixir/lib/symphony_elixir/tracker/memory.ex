@@ -15,7 +15,23 @@ defmodule SymphonyElixir.Tracker.Memory do
 
   @impl true
   def fetch_candidate_issues do
-    {:ok, issue_entries()}
+    # When this flag is set, mimic GitHub's `state: "open"` semantics by
+    # dropping Done-state issues from the candidate list while still leaving
+    # them visible to `fetch_issue_states_by_ids/1`. Used by tests that
+    # exercise the reaper / blocker code paths under GitHub-like conditions.
+    drop_done? =
+      Application.get_env(:symphony_elixir, :memory_tracker_drop_done_from_candidates, false)
+
+    entries = issue_entries()
+
+    filtered =
+      if drop_done? do
+        Enum.reject(entries, fn issue -> issue.state == "Done" end)
+      else
+        entries
+      end
+
+    {:ok, filtered}
   end
 
   @impl true
@@ -51,6 +67,26 @@ defmodule SymphonyElixir.Tracker.Memory do
   def update_issue_state(issue_id, state_name) do
     send_event({:memory_tracker_state_update, issue_id, state_name})
     :ok
+  end
+
+  @impl true
+  def fetch_sub_issues(parent_id) when is_binary(parent_id) do
+    map = Application.get_env(:symphony_elixir, :memory_tracker_sub_issues, %{})
+    {:ok, Map.get(map, parent_id, [])}
+  end
+
+  @impl true
+  def fetch_plan(epic_id) when is_binary(epic_id) do
+    errors = Application.get_env(:symphony_elixir, :memory_tracker_plan_errors, %{})
+
+    case Map.get(errors, epic_id) do
+      nil ->
+        plans = Application.get_env(:symphony_elixir, :memory_tracker_plans, %{})
+        {:ok, Map.get(plans, epic_id)}
+
+      reason ->
+        {:error, reason}
+    end
   end
 
   defp configured_issues do

@@ -9,10 +9,17 @@ defmodule SymphonyElixir.Orchestrator do
 
   alias SymphonyElixir.{AgentRunner, Config, Issue, StatusDashboard, Tracker, Workspace}
 
+  @planner_failure_comment """
+  Symphony's epic planner run did not produce a valid `<!-- symphony-plan:v1 -->` block on this issue.
+
+  Moving to Human Review for manual triage. To retry, remove the `symphony:human-review` label, re-add `symphony:todo`, and ensure GitHub sub-issues are configured.
+  """
+
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
+  @epic_planner_max_turns 4
   @empty_codex_totals %{
     input_tokens: 0,
     output_tokens: 0,
@@ -224,9 +231,16 @@ defmodule SymphonyElixir.Orchestrator do
     state = reconcile_running_issues(state)
 
     with :ok <- Config.validate!(),
-         {:ok, issues} <- Tracker.fetch_candidate_issues(),
-         true <- available_slots(state) > 0 do
-      choose_issues(issues, state)
+         {:ok, issues} <- Tracker.fetch_candidate_issues() do
+      :ok = escalate_failed_planner_runs(issues, state.running)
+
+      run_epic_reaper(issues)
+
+      if available_slots(state) > 0 do
+        choose_issues(issues, state)
+      else
+        state
+      end
     else
       {:error, :missing_linear_api_token} ->
         Logger.error("Linear API token missing in WORKFLOW.md")
@@ -264,9 +278,6 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
-        state
-
-      false ->
         state
     end
   end
@@ -690,8 +701,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
+    base_opts = [attempt: attempt, worker_host: worker_host]
+    run_opts = build_run_opts(issue, base_opts)
+    runner = agent_runner_module()
+
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
+           runner.run(issue, recipient, run_opts)
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
@@ -1065,6 +1080,183 @@ defmodule SymphonyElixir.Orchestrator do
     )
   end
 
+  defp agent_runner_module do
+    Application.get_env(:symphony_elixir, :agent_runner_module, AgentRunner)
+  end
+
+  defp build_run_opts(%Issue{} = issue, base_opts) do
+    case epic_classification(issue) do
+      {:epic, sub_numbers} ->
+        Keyword.merge(base_opts,
+          variant: :epic_planner,
+          max_turns: @epic_planner_max_turns,
+          epic: %{sub_issue_numbers: sub_numbers}
+        )
+
+      :regular ->
+        base_opts
+    end
+  end
+
+  defp build_run_opts(_issue, base_opts), do: base_opts
+
+  defp epic_classification(%Issue{id: id, state: state})
+       when is_binary(id) and is_binary(state) do
+    if normalize_issue_state(state) == "epic tracking" do
+      :regular
+    else
+      case Tracker.fetch_sub_issues(id) do
+        {:ok, [_ | _] = numbers} -> {:epic, numbers}
+        _ -> :regular
+      end
+    end
+  end
+
+  defp epic_classification(_issue), do: :regular
+
+  defp escalate_failed_planner_runs(issues, running)
+       when is_list(issues) and is_map(running) do
+    Enum.each(issues, fn
+      %Issue{} = issue -> escalate_one(issue, running)
+      _ -> :ok
+    end)
+
+    :ok
+  end
+
+  defp escalate_one(issue, running) do
+    cond do
+      Map.has_key?(running, issue.id) ->
+        # Planner is mid-flight on a worker; do not escalate.
+        :ok
+
+      planner_failed?(issue) ->
+        Logger.warning("Epic planner failure detected for #{issue_context(issue)}; escalating to Human Review")
+
+        escalate_to_human_review(issue)
+
+      true ->
+        :ok
+    end
+  end
+
+  defp escalate_to_human_review(issue) do
+    case Tracker.create_comment(issue.id, @planner_failure_comment) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to comment escalation on #{issue.id}: #{inspect(reason)}")
+    end
+
+    case Tracker.update_issue_state(issue.id, "Human Review") do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("Failed to update state on #{issue.id} during escalation: #{inspect(reason)}")
+    end
+  end
+
+  defp run_epic_reaper(issues) do
+    epics = Enum.filter(issues, &(&1.state == "Epic Tracking"))
+    Enum.each(epics, &maybe_reap_epic(&1, issues))
+  end
+
+  defp maybe_reap_epic(epic, issues) do
+    case Tracker.fetch_sub_issues(epic.id) do
+      {:ok, [_ | _] = sub_numbers} ->
+        state_by_id = build_state_by_id(issues, sub_numbers)
+        reap_if_done(epic, sub_numbers, state_by_id)
+
+      _ ->
+        :ok
+    end
+  end
+
+  # Builds a map from sub-issue identifier (string) to state, augmenting the
+  # candidate `issues` list with any sub_numbers missing from it. Children that
+  # have already been closed (Done) won't appear in `fetch_candidate_issues`
+  # because GitHub's API request filters by `state: "open"`, so we must look
+  # them up explicitly via `fetch_issue_states_by_ids/1` to avoid the reaper
+  # missing the all-children-Done condition.
+  defp build_state_by_id(issues, sub_numbers) do
+    in_list = Map.new(issues, &{&1.identifier, &1.state})
+    missing = Enum.reject(sub_numbers, fn n -> Map.has_key?(in_list, Integer.to_string(n)) end)
+
+    if missing == [] do
+      in_list
+    else
+      merge_fetched_child_states(in_list, missing)
+    end
+  end
+
+  defp merge_fetched_child_states(in_list, missing) do
+    case Tracker.fetch_issue_states_by_ids(Enum.map(missing, &Integer.to_string/1)) do
+      {:ok, fetched} ->
+        Enum.reduce(fetched, in_list, fn issue, acc ->
+          Map.put(acc, issue.identifier, issue.state)
+        end)
+
+      _ ->
+        in_list
+    end
+  end
+
+  defp reap_if_done(epic, sub_numbers, state_by_id) do
+    if all_children_done?(sub_numbers, state_by_id) do
+      Logger.info("Epic reaper: closing #{issue_context(epic)} (all children Done)")
+
+      case Tracker.update_issue_state(epic.id, "Done") do
+        :ok -> :ok
+        {:error, reason} -> Logger.warning("Epic reaper: failed to close #{epic.id}: #{inspect(reason)}")
+      end
+    else
+      :ok
+    end
+  end
+
+  defp all_children_done?(sub_numbers, state_by_id) do
+    Enum.all?(sub_numbers, fn n ->
+      Map.get(state_by_id, Integer.to_string(n)) == "Done"
+    end)
+  end
+
+  defp planner_failed?(%Issue{id: id, state: state})
+       when is_binary(id) and is_binary(state) do
+    if normalize_issue_state(state) == "in progress" do
+      case Tracker.fetch_sub_issues(id) do
+        {:ok, [_ | _]} -> plan_invalid?(id)
+        _ -> false
+      end
+    else
+      false
+    end
+  end
+
+  defp planner_failed?(_issue), do: false
+
+  @plan_invalid_error_tags [
+    :invalid_yaml,
+    :missing_field,
+    :invalid_sub_issue,
+    :schema_mismatch,
+    :plan_references_unknown_ids,
+    :plan_missing_sub_issues
+  ]
+
+  defp plan_invalid?(epic_id) do
+    case Tracker.fetch_plan(epic_id) do
+      {:ok, nil} -> true
+      {:ok, %{}} -> false
+      {:error, reason} -> plan_error_invalid?(reason)
+      _ -> false
+    end
+  end
+
+  defp plan_error_invalid?({tag, _}) when tag in @plan_invalid_error_tags, do: true
+  defp plan_error_invalid?(_), do: false
+
   @spec request_refresh() :: map() | :unavailable
   def request_refresh do
     request_refresh(__MODULE__)
@@ -1166,6 +1358,12 @@ defmodule SymphonyElixir.Orchestrator do
        requested_at: DateTime.utc_now(),
        operations: ["poll", "reconcile"]
      }, state}
+  end
+
+  def handle_call(:force_tick, _from, state) do
+    state = refresh_runtime_config(state)
+    state = maybe_dispatch(state)
+    {:reply, :ok, state}
   end
 
   defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update) do

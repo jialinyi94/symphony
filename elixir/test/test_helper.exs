@@ -1,3 +1,5 @@
 ExUnit.start()
 Code.require_file("support/snapshot_support.exs", __DIR__)
 Code.require_file("support/test_support.exs", __DIR__)
+Code.require_file("support/github_client_stub.exs", __DIR__)
+Code.require_file("support/orchestrator_test_helper.exs", __DIR__)

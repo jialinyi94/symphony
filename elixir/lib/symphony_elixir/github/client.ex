@@ -48,6 +48,68 @@ defmodule SymphonyElixir.GitHub.Client do
     end
   end
 
+  @spec fetch_sub_issues(String.t()) :: {:ok, [integer()]} | {:error, term()}
+  def fetch_sub_issues(issue_id) when is_binary(issue_id) do
+    settings = Config.settings!().tracker
+
+    with {:ok, headers} <- request_headers() do
+      url = "#{api_base()}/repos/#{repo!(settings)}/issues/#{issue_id}/sub_issues"
+
+      case Req.get(url, headers: headers, params: [per_page: @per_page], connect_options: [timeout: 30_000]) do
+        {:ok, %{status: 200, body: body}} when is_list(body) ->
+          {:ok, body |> Enum.map(& &1["number"]) |> Enum.reject(&is_nil/1)}
+
+        {:ok, response} ->
+          {:error, {:github_http_error, response.status, summarize(response)}}
+
+        {:error, reason} ->
+          {:error, {:github_request_failed, reason}}
+      end
+    end
+  end
+
+  @spec fetch_issue_comments(String.t()) ::
+          {:ok, [%{id: integer(), body: String.t(), updated_at: DateTime.t() | nil}]} | {:error, term()}
+  def fetch_issue_comments(issue_id) when is_binary(issue_id) do
+    settings = Config.settings!().tracker
+
+    with {:ok, headers} <- request_headers() do
+      url = "#{api_base()}/repos/#{repo!(settings)}/issues/#{issue_id}/comments"
+
+      do_paginate_comments(url, headers, [], 1, [])
+    end
+  end
+
+  defp do_paginate_comments(url, headers, params, page, acc) do
+    full_params = Keyword.merge(params, per_page: @per_page, page: page)
+
+    case Req.get(url, headers: headers, params: full_params, connect_options: [timeout: 30_000]) do
+      {:ok, %{status: 200, body: body}} when is_list(body) ->
+        normalized = Enum.map(body, &normalize_comment/1)
+        new_acc = acc ++ normalized
+
+        if length(body) < @per_page do
+          {:ok, new_acc}
+        else
+          do_paginate_comments(url, headers, params, page + 1, new_acc)
+        end
+
+      {:ok, response} ->
+        {:error, {:github_http_error, response.status, summarize(response)}}
+
+      {:error, reason} ->
+        {:error, {:github_request_failed, reason}}
+    end
+  end
+
+  defp normalize_comment(%{"id" => id, "body" => body} = raw) do
+    %{
+      id: id,
+      body: body || "",
+      updated_at: parse_datetime(raw["updated_at"])
+    }
+  end
+
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   def create_comment(issue_id, body) when is_binary(issue_id) and is_binary(body) do
     settings = Config.settings!().tracker
@@ -153,6 +215,7 @@ defmodule SymphonyElixir.GitHub.Client do
   defp normalize_issue(raw, active_states, terminal_states) when is_map(raw) do
     labels = extract_labels(raw)
     github_state = raw["state"] || "open"
+    state_name = StateMapping.state_from_labels(labels, github_state, active_states, terminal_states)
 
     %Issue{
       id: to_string(raw["number"]),
@@ -160,16 +223,19 @@ defmodule SymphonyElixir.GitHub.Client do
       title: raw["title"],
       description: raw["body"],
       priority: nil,
-      state: StateMapping.state_from_labels(labels, github_state, active_states, terminal_states),
+      state: state_name,
       branch_name: nil,
       url: raw["html_url"],
       assignee_id: get_in(raw, ["assignee", "login"]),
       labels: labels,
-      assigned_to_worker: true,
+      assigned_to_worker: assigned_to_worker_for_state(state_name),
       created_at: parse_datetime(raw["created_at"]),
       updated_at: parse_datetime(raw["updated_at"])
     }
   end
+
+  defp assigned_to_worker_for_state("Epic Tracking"), do: false
+  defp assigned_to_worker_for_state(_), do: true
 
   defp extract_labels(%{"labels" => labels}) when is_list(labels) do
     labels
@@ -213,7 +279,9 @@ defmodule SymphonyElixir.GitHub.Client do
   defp repo!(_),
     do: raise(ArgumentError, "tracker.repo must be set (format: \"owner/name\") for github tracker")
 
-  defp api_base, do: "https://api.github.com"
+  defp api_base do
+    Application.get_env(:symphony_elixir, :github_api_base, "https://api.github.com")
+  end
 
   defp summarize(response) do
     body =

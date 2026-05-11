@@ -9,25 +9,36 @@ defmodule SymphonyElixir.PromptBuilder do
 
   @spec build_prompt(SymphonyElixir.Issue.t(), keyword()) :: String.t()
   def build_prompt(issue, opts \\ []) do
+    variant = Keyword.get(opts, :variant, :default)
+
     template =
       Workflow.current()
-      |> prompt_template!()
+      |> prompt_template_for!(variant)
       |> parse_template!()
 
+    context = %{
+      "attempt" => Keyword.get(opts, :attempt),
+      "issue" => issue |> Map.from_struct() |> to_solid_map(),
+      "epic" => to_solid_value(Keyword.get(opts, :epic, %{}))
+    }
+
     template
-    |> Solid.render!(
-      %{
-        "attempt" => Keyword.get(opts, :attempt),
-        "issue" => issue |> Map.from_struct() |> to_solid_map()
-      },
-      @render_opts
-    )
+    |> Solid.render!(context, @render_opts)
     |> IO.iodata_to_binary()
   end
 
-  defp prompt_template!({:ok, %{prompt_template: prompt}}), do: default_prompt(prompt)
+  defp prompt_template_for!({:ok, %{prompts: _prompts, prompt_template: default}}, :default) do
+    default_prompt(default)
+  end
 
-  defp prompt_template!({:error, reason}) do
+  defp prompt_template_for!({:ok, %{prompts: prompts}}, variant) do
+    case Map.get(prompts, variant) do
+      nil -> raise RuntimeError, "workflow_missing_prompt: missing prompts.#{variant}"
+      template -> template
+    end
+  end
+
+  defp prompt_template_for!({:error, reason}, _variant) do
     raise RuntimeError, "workflow_unavailable: #{inspect(reason)}"
   end
 

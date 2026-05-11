@@ -9,7 +9,7 @@ defmodule SymphonyElixir.GitHub.Adapter do
 
   @behaviour SymphonyElixir.Tracker
 
-  alias SymphonyElixir.{Config, GitHub.Client, GitHub.StateMapping}
+  alias SymphonyElixir.{Config, GitHub.Client, GitHub.EpicPlan, GitHub.StateMapping}
 
   @impl true
   def kind, do: "github"
@@ -27,10 +27,153 @@ defmodule SymphonyElixir.GitHub.Adapter do
   end
 
   @impl true
-  def fetch_candidate_issues, do: client_module().fetch_candidate_issues()
+  def fetch_sub_issues(issue_id) when is_binary(issue_id) do
+    client_module().fetch_sub_issues(issue_id)
+  end
 
   @impl true
-  def fetch_issues_by_states(states), do: client_module().fetch_issues_by_states(states)
+  def fetch_plan(epic_id) when is_binary(epic_id) do
+    with {:ok, comments} <- client_module().fetch_issue_comments(epic_id) do
+      case EpicPlan.extract(comments) do
+        {:ok, plan} ->
+          validate_plan_against_actual_sub_issues(plan, epic_id)
+
+        {:error, :no_plan} ->
+          {:ok, nil}
+
+        {:error, _reason} = err ->
+          err
+      end
+    end
+  end
+
+  # Note: this calls `fetch_sub_issues` once per epic per polling tick on top of
+  # the candidate-list fetch and the orchestrator's epic_classification lookup.
+  # At single-digit-epics-per-repo scale this is fine; if it ever becomes a
+  # bottleneck, cache `fetch_sub_issues` results in the process dictionary for
+  # the duration of a single polling tick.
+  defp validate_plan_against_actual_sub_issues(plan, epic_id) do
+    case client_module().fetch_sub_issues(epic_id) do
+      {:ok, sub_numbers} ->
+        case EpicPlan.validate_against_sub_issues(plan, sub_numbers) do
+          :ok -> {:ok, plan}
+          {:error, _} = err -> err
+        end
+
+      {:error, _reason} = err ->
+        # If we can't fetch sub_issues to validate, propagate that error
+        # rather than silently accepting an unvalidated plan.
+        err
+    end
+  end
+
+  @impl true
+  def fetch_candidate_issues do
+    with {:ok, raw_issues} <- client_module().fetch_candidate_issues() do
+      {:ok, populate_blocked_by_from_plans(raw_issues)}
+    end
+  end
+
+  @impl true
+  def fetch_issues_by_states(states) do
+    with {:ok, raw_issues} <- client_module().fetch_issues_by_states(states) do
+      {:ok, populate_blocked_by_from_plans(raw_issues)}
+    end
+  end
+
+  defp populate_blocked_by_from_plans(issues) do
+    state_by_number = build_state_by_number(issues)
+    epics = Enum.filter(issues, &(&1.state == "Epic Tracking"))
+
+    # Cache the plan once per epic so we don't double-fetch (once for blocker
+    # discovery, once for blocker computation).
+    plans_by_epic = Enum.into(epics, %{}, fn epic -> {epic.id, fetch_plan_safe(epic.id)} end)
+
+    # Augment state_by_number with any plan-referenced ids that are not in
+    # `issues` (e.g., Done children that have been closed and dropped from
+    # the open candidate list returned by GitHub's `state: "open"` filter).
+    augmented_state_by_number =
+      augment_with_terminal_states(plans_by_epic, state_by_number)
+
+    blockers_by_child =
+      epics
+      |> Enum.flat_map(fn epic ->
+        blockers_for_epic(plans_by_epic[epic.id], augmented_state_by_number)
+      end)
+      |> Enum.into(%{})
+
+    Enum.map(issues, fn issue ->
+      case Map.get(blockers_by_child, issue.id) do
+        nil -> issue
+        blockers -> %{issue | blocked_by: blockers}
+      end
+    end)
+  end
+
+  defp build_state_by_number(issues) do
+    issues
+    |> Enum.into(%{}, fn issue ->
+      case Integer.parse(issue.id || "") do
+        {n, _} -> {n, issue.state}
+        :error -> {nil, issue.state}
+      end
+    end)
+    |> Map.delete(nil)
+  end
+
+  defp fetch_plan_safe(epic_id) do
+    case fetch_plan(epic_id) do
+      {:ok, %{sub_issues: _} = plan} -> plan
+      _ -> nil
+    end
+  end
+
+  defp augment_with_terminal_states(plans_by_epic, state_by_number) do
+    referenced_ids =
+      plans_by_epic
+      |> Map.values()
+      |> Enum.flat_map(&plan_referenced_ids/1)
+      |> Enum.uniq()
+
+    missing_ids = Enum.reject(referenced_ids, &Map.has_key?(state_by_number, &1))
+
+    if missing_ids == [] do
+      state_by_number
+    else
+      merge_fetched_states(state_by_number, missing_ids)
+    end
+  end
+
+  defp merge_fetched_states(state_by_number, missing_ids) do
+    case client_module().fetch_issue_states_by_ids(Enum.map(missing_ids, &Integer.to_string/1)) do
+      {:ok, fetched} -> Enum.reduce(fetched, state_by_number, &put_state_by_number/2)
+      _ -> state_by_number
+    end
+  end
+
+  defp put_state_by_number(issue, acc) do
+    case Integer.parse(issue.id || "") do
+      {n, _} -> Map.put(acc, n, issue.state)
+      :error -> acc
+    end
+  end
+
+  defp plan_referenced_ids(nil), do: []
+
+  defp plan_referenced_ids(%{sub_issues: subs}) do
+    Enum.flat_map(subs, fn sub -> [sub.id | sub.blocked_by] end)
+  end
+
+  defp blockers_for_epic(nil, _state_by_number), do: []
+
+  defp blockers_for_epic(%{sub_issues: subs}, state_by_number) do
+    Enum.map(subs, &sub_to_blocker_entry(&1, state_by_number))
+  end
+
+  defp sub_to_blocker_entry(sub, state_by_number) do
+    blockers = Enum.map(sub.blocked_by, &%{state: Map.get(state_by_number, &1, "Todo")})
+    {Integer.to_string(sub.id), blockers}
+  end
 
   @impl true
   def fetch_issue_states_by_ids(issue_ids), do: client_module().fetch_issue_states_by_ids(issue_ids)

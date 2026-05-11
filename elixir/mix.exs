@@ -44,7 +44,8 @@ defmodule SymphonyElixir.MixProject do
       ],
       test_ignore_filters: [
         "test/support/snapshot_support.exs",
-        "test/support/test_support.exs"
+        "test/support/test_support.exs",
+        "test/support/orchestrator_test_helper.exs"
       ],
       dialyzer: [
         plt_add_apps: [:mix]
@@ -78,7 +79,8 @@ defmodule SymphonyElixir.MixProject do
       {:solid, "~> 1.2"},
       {:ecto, "~> 3.13"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
-      {:dialyxir, "~> 1.4", only: [:dev], runtime: false}
+      {:dialyxir, "~> 1.4", only: [:dev], runtime: false},
+      {:bypass, "~> 2.1", only: :test}
     ]
   end
 

@@ -78,13 +78,14 @@ defmodule SymphonyElixir.OrchestratorTestHelper do
     plan = %{
       schema: 1,
       generated_at: nil,
-      sub_issues: Enum.map(raw_plan, fn entry ->
-        %{
-          id: Map.fetch!(entry, :id),
-          blocked_by: Map.fetch!(entry, :blocked_by),
-          rationale: Map.get(entry, :rationale)
-        }
-      end)
+      sub_issues:
+        Enum.map(raw_plan, fn entry ->
+          %{
+            id: Map.fetch!(entry, :id),
+            blocked_by: Map.fetch!(entry, :blocked_by),
+            rationale: Map.get(entry, :rationale)
+          }
+        end)
     }
 
     # Inject the plan

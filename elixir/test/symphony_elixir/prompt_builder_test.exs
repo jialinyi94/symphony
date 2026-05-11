@@ -7,10 +7,12 @@ defmodule SymphonyElixir.PromptBuilderTest do
     path = Path.join(System.tmp_dir!(), "WORKFLOW-#{:erlang.unique_integer([:positive])}.md")
     File.write!(path, content)
     Workflow.set_workflow_file_path(path)
+
     on_exit(fn ->
       _ = File.rm(path)
       Workflow.clear_workflow_file_path()
     end)
+
     path
   end
 

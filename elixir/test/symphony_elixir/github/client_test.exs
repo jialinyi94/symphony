@@ -39,10 +39,14 @@ defmodule SymphonyElixir.GitHub.ClientTest do
       write_workflow_file!(Workflow.workflow_file_path(), @github_overrides)
 
       Bypass.expect_once(bypass, "GET", "/repos/owner/name/issues/133/comments", fn conn ->
-        json_resp(conn, 200, Jason.encode!([
-          %{"id" => 1, "body" => "first comment", "updated_at" => "2026-05-08T10:00:00Z"},
-          %{"id" => 2, "body" => "second comment", "updated_at" => "2026-05-08T11:00:00Z"}
-        ]))
+        json_resp(
+          conn,
+          200,
+          Jason.encode!([
+            %{"id" => 1, "body" => "first comment", "updated_at" => "2026-05-08T10:00:00Z"},
+            %{"id" => 2, "body" => "second comment", "updated_at" => "2026-05-08T11:00:00Z"}
+          ])
+        )
       end)
 
       assert {:ok, comments} = Client.fetch_issue_comments("133")
@@ -167,18 +171,22 @@ defmodule SymphonyElixir.GitHub.ClientTest do
 
     test "Epic Tracking issues get assigned_to_worker: false", %{bypass: bypass} do
       Bypass.expect_once(bypass, "GET", "/repos/owner/name/issues", fn conn ->
-        json_resp(conn, 200, Jason.encode!([
-          %{
-            "number" => 1,
-            "title" => "epic",
-            "body" => "",
-            "state" => "open",
-            "html_url" => "https://x",
-            "labels" => [%{"name" => "symphony:epic-tracking"}],
-            "created_at" => "2026-05-08T10:00:00Z",
-            "updated_at" => "2026-05-08T10:00:00Z"
-          }
-        ]))
+        json_resp(
+          conn,
+          200,
+          Jason.encode!([
+            %{
+              "number" => 1,
+              "title" => "epic",
+              "body" => "",
+              "state" => "open",
+              "html_url" => "https://x",
+              "labels" => [%{"name" => "symphony:epic-tracking"}],
+              "created_at" => "2026-05-08T10:00:00Z",
+              "updated_at" => "2026-05-08T10:00:00Z"
+            }
+          ])
+        )
       end)
 
       {:ok, [issue]} = Client.fetch_candidate_issues()
@@ -188,18 +196,22 @@ defmodule SymphonyElixir.GitHub.ClientTest do
 
     test "non-Epic Tracking issues retain assigned_to_worker: true", %{bypass: bypass} do
       Bypass.expect_once(bypass, "GET", "/repos/owner/name/issues", fn conn ->
-        json_resp(conn, 200, Jason.encode!([
-          %{
-            "number" => 2,
-            "title" => "regular",
-            "body" => "",
-            "state" => "open",
-            "html_url" => "https://x",
-            "labels" => [%{"name" => "symphony:todo"}],
-            "created_at" => "2026-05-08T10:00:00Z",
-            "updated_at" => "2026-05-08T10:00:00Z"
-          }
-        ]))
+        json_resp(
+          conn,
+          200,
+          Jason.encode!([
+            %{
+              "number" => 2,
+              "title" => "regular",
+              "body" => "",
+              "state" => "open",
+              "html_url" => "https://x",
+              "labels" => [%{"name" => "symphony:todo"}],
+              "created_at" => "2026-05-08T10:00:00Z",
+              "updated_at" => "2026-05-08T10:00:00Z"
+            }
+          ])
+        )
       end)
 
       {:ok, [issue]} = Client.fetch_candidate_issues()

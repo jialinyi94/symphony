@@ -268,16 +268,29 @@ defmodule SymphonyElixir.OrchestratorEpicTest do
   describe "e2e: full epic flow" do
     test "planner -> children dispatch in topo order -> reaper closes parent" do
       epic = %SymphonyElixir.Issue{
-        id: "500", identifier: "500", title: "Epic", state: "Todo",
+        id: "500",
+        identifier: "500",
+        title: "Epic",
+        state: "Todo",
         labels: ["symphony:todo"]
       }
+
       child_a = %SymphonyElixir.Issue{
-        id: "501", identifier: "501", title: "Child A", state: "Todo",
-        labels: ["symphony:todo"], blocked_by: []
+        id: "501",
+        identifier: "501",
+        title: "Child A",
+        state: "Todo",
+        labels: ["symphony:todo"],
+        blocked_by: []
       }
+
       child_b = %SymphonyElixir.Issue{
-        id: "502", identifier: "502", title: "Child B", state: "Todo",
-        labels: ["symphony:todo"], blocked_by: [%{state: "Todo"}]
+        id: "502",
+        identifier: "502",
+        title: "Child B",
+        state: "Todo",
+        labels: ["symphony:todo"],
+        blocked_by: [%{state: "Todo"}]
       }
 
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [epic, child_a, child_b])

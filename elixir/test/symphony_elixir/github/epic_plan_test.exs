@@ -118,12 +118,14 @@ defmodule SymphonyElixir.GitHub.EpicPlanTest do
 
     test "fails when plan references unknown id" do
       {:ok, plan} = EpicPlan.extract([comment(valid_block())])
+
       assert {:error, {:plan_references_unknown_ids, [135]}} =
                EpicPlan.validate_against_sub_issues(plan, [134])
     end
 
     test "fails when plan misses a sub_issue" do
       {:ok, plan} = EpicPlan.extract([comment(valid_block())])
+
       assert {:error, {:plan_missing_sub_issues, [136]}} =
                EpicPlan.validate_against_sub_issues(plan, [134, 135, 136])
     end

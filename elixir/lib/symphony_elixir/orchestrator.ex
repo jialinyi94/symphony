@@ -1131,9 +1131,7 @@ defmodule SymphonyElixir.Orchestrator do
         :ok
 
       planner_failed?(issue) ->
-        Logger.warning(
-          "Epic planner failure detected for #{issue_context(issue)}; escalating to Human Review"
-        )
+        Logger.warning("Epic planner failure detected for #{issue_context(issue)}; escalating to Human Review")
 
         escalate_to_human_review(issue)
 
@@ -1156,9 +1154,7 @@ defmodule SymphonyElixir.Orchestrator do
         :ok
 
       {:error, reason} ->
-        Logger.error(
-          "Failed to update state on #{issue.id} during escalation: #{inspect(reason)}"
-        )
+        Logger.error("Failed to update state on #{issue.id} during escalation: #{inspect(reason)}")
     end
   end
 

@@ -35,13 +35,14 @@ defmodule SymphonyElixir.GitHub.AdapterTest do
 
   describe "fetch_candidate_issues with epic plan" do
     test "children inherit blocked_by from the parent epic's plan comment" do
-      epic = ClientStub.sample_issue(
-        id: "100",
-        identifier: "100",
-        state: "Epic Tracking",
-        assigned_to_worker: false,
-        labels: ["symphony:epic-tracking"]
-      )
+      epic =
+        ClientStub.sample_issue(
+          id: "100",
+          identifier: "100",
+          state: "Epic Tracking",
+          assigned_to_worker: false,
+          labels: ["symphony:epic-tracking"]
+        )
 
       child134 = ClientStub.sample_issue(id: "134", identifier: "134", state: "Todo", labels: ["symphony:todo"])
       child135 = ClientStub.sample_issue(id: "135", identifier: "135", state: "Todo", labels: ["symphony:todo"])

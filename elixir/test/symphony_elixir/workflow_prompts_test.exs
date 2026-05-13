@@ -47,4 +47,65 @@ defmodule SymphonyElixir.WorkflowPromptsTest do
     {:ok, loaded} = Workflow.load()
     assert loaded.prompts == %{}
   end
+
+  describe "prompt_available?/1" do
+    test ":default is always available regardless of WORKFLOW content" do
+      write_workflow!("""
+      ---
+      tracker:
+        kind: memory
+      ---
+      Default prompt body.
+      """)
+
+      assert Workflow.prompt_available?(:default) == true
+    end
+
+    test "returns true when prompts.<variant> exists in frontmatter" do
+      write_workflow!("""
+      ---
+      tracker:
+        kind: memory
+      prompts:
+        pr_first_review: |
+          Review this PR.
+      ---
+      Default prompt body.
+      """)
+
+      assert Workflow.prompt_available?(:pr_first_review) == true
+    end
+
+    test "returns false when prompts: block exists but lacks the named variant" do
+      write_workflow!("""
+      ---
+      tracker:
+        kind: memory
+      prompts:
+        epic_planner: |
+          Plan the epic.
+      ---
+      Default prompt body.
+      """)
+
+      refute Workflow.prompt_available?(:pr_first_review)
+    end
+
+    test "returns false when frontmatter has no prompts: block" do
+      write_workflow!("""
+      ---
+      tracker:
+        kind: memory
+      ---
+      Default prompt body.
+      """)
+
+      refute Workflow.prompt_available?(:pr_first_review)
+    end
+
+    test "returns false for non-atom variants (guards against caller bugs)" do
+      refute Workflow.prompt_available?("pr_first_review")
+      refute Workflow.prompt_available?(nil)
+    end
+  end
 end

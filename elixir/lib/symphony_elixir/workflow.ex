@@ -45,6 +45,32 @@ defmodule SymphonyElixir.Workflow do
     end
   end
 
+  @doc """
+  True when the currently-loaded workflow defines a `prompts.<variant>`
+  entry under its YAML front matter.
+
+  Used by the orchestrator's PR-stage dispatch to gracefully no-op when
+  WORKFLOW.md hasn't yet been updated with stage-specific prompts —
+  rebuilding the service after a stage-introducing release would
+  otherwise crash at `PromptBuilder.build_prompt/2` (which raises
+  `workflow_missing_prompt`).
+
+  The `:default` variant is always considered available because
+  `PromptBuilder` resolves it via the top-level `prompt_template`, not
+  the named `prompts:` block.
+  """
+  @spec prompt_available?(atom()) :: boolean()
+  def prompt_available?(:default), do: true
+
+  def prompt_available?(variant) when is_atom(variant) do
+    case current() do
+      {:ok, %{prompts: prompts}} when is_map(prompts) -> Map.has_key?(prompts, variant)
+      _ -> false
+    end
+  end
+
+  def prompt_available?(_variant), do: false
+
   @spec load() :: {:ok, loaded_workflow()} | {:error, term()}
   def load do
     load(workflow_file_path())

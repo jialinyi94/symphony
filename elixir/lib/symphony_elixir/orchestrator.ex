@@ -7,7 +7,18 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, Issue, Stage, StageResolver, StatusDashboard, Tracker, WorkItem, Workspace}
+  alias SymphonyElixir.{
+    AgentRunner,
+    Config,
+    Issue,
+    Stage,
+    StageResolver,
+    StatusDashboard,
+    Tracker,
+    Workflow,
+    WorkItem,
+    Workspace
+  }
 
   @planner_failure_comment """
   Symphony's epic planner run did not produce a valid `<!-- symphony-plan:v1 -->` block on this issue.
@@ -1152,7 +1163,7 @@ defmodule SymphonyElixir.Orchestrator do
     case StageResolver.resolve(wi, Stage.defaults()) do
       {:ok, %Stage{} = stage} ->
         case Stage.dispatch_options(stage, wi, base_opts) do
-          {:ok, opts} -> {:ok, opts}
+          {:ok, opts} -> guard_prompt_availability(opts, stage, wi, base_opts)
           {:skip, _terminal_stage} -> {:ok, Keyword.put(base_opts, :skip_dispatch, true)}
         end
 
@@ -1160,6 +1171,31 @@ defmodule SymphonyElixir.Orchestrator do
         :legacy
     end
   end
+
+  # When a non-terminal stage resolves to a non-`:default` prompt
+  # variant that hasn't been defined in WORKFLOW.md yet, skip
+  # dispatch instead of crashing the agent run on the missing
+  # prompt. This makes "rebuild + restart before updating
+  # WORKFLOW.md" a safe operational sequence: PR-stage detection
+  # still happens (so we can observe progress in logs), but the
+  # orchestrator won't dispatch an agent that would immediately
+  # raise `workflow_missing_prompt` in `PromptBuilder.build_prompt/2`.
+  defp guard_prompt_availability(opts, %Stage{} = stage, %WorkItem{} = wi, base_opts) do
+    variant = Keyword.get(opts, :variant, :default)
+
+    if Workflow.prompt_available?(variant) do
+      {:ok, opts}
+    else
+      Logger.warning(
+        "Skipping dispatch for #{stage_log_context(wi)}: stage=#{inspect(stage.id)} resolves to prompt variant=#{inspect(variant)} but WORKFLOW.md has no prompts.#{variant} entry. Update WORKFLOW.md and rebuild to activate this stage."
+      )
+
+      {:ok, Keyword.put(base_opts, :skip_dispatch, true)}
+    end
+  end
+
+  defp stage_log_context(%WorkItem{issue: %Issue{} = issue}), do: issue_context(issue)
+  defp stage_log_context(%WorkItem{}), do: "issue_id=unknown"
 
   defp legacy_build_run_opts(%Issue{} = issue, base_opts) do
     case epic_classification(issue) do

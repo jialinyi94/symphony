@@ -98,13 +98,19 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  # `command: nil` is intentional — it means "no override, let the
+  # runner pick its own default." Previously this populated
+  # `claude_code.command` regardless of `agent.kind`, which silently
+  # ran the wrong binary when `agent.kind: "codex"` (claude.command
+  # was injected as a codex command). Both `ClaudeCode.Runner` and
+  # `Codex.AppServer` already fall back to their respective
+  # `settings.<runner>.command` when role.command is nil, so the
+  # global config still drives implementer behavior end-to-end.
   defp default_role("implementer") do
-    s = settings!()
-
     %Role{
       id: "implementer",
-      agent_kind: s.agent.kind || "claude_code",
-      command: claude_code_command_or_nil(s)
+      agent_kind: settings!().agent.kind || "claude_code",
+      command: nil
     }
   end
 
@@ -114,13 +120,6 @@ defmodule SymphonyElixir.Config do
 
   defp default_role(other) do
     %Role{id: other}
-  end
-
-  defp claude_code_command_or_nil(settings) do
-    case settings.claude_code do
-      %{command: command} when is_binary(command) and command != "" -> command
-      _ -> nil
-    end
   end
 
   @spec workflow_prompt() :: String.t()
@@ -166,15 +165,13 @@ defmodule SymphonyElixir.Config do
   end
 
   defp validate_semantics(settings) do
-    cond do
-      is_nil(settings.tracker.kind) ->
-        {:error, :missing_tracker_kind}
-
-      true ->
-        case SymphonyElixir.Tracker.adapter_for_kind(settings.tracker.kind) do
-          {:ok, adapter} -> adapter.validate_config(settings.tracker)
-          {:error, _} = err -> err
-        end
+    if is_nil(settings.tracker.kind) do
+      {:error, :missing_tracker_kind}
+    else
+      case SymphonyElixir.Tracker.adapter_for_kind(settings.tracker.kind) do
+        {:ok, adapter} -> adapter.validate_config(settings.tracker)
+        {:error, _} = err -> err
+      end
     end
   end
 

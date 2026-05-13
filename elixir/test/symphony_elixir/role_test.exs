@@ -63,13 +63,21 @@ defmodule SymphonyElixir.RoleTest do
   end
 
   describe "Config.role/1 — defaults when roles: block absent in WORKFLOW" do
-    test "implementer defaults pick up agent.kind + claude_code.command from existing config" do
+    test "implementer defaults pick up agent.kind from existing config; command stays nil" do
       role = Config.role("implementer")
       assert role.id == "implementer"
       # Test workflow defaults to agent.kind=codex (see TestSupport workflow_content),
       # so the implementer role inherits that.
       assert role.agent_kind in ["claude_code", "codex"]
       assert role.github_token_env == nil
+
+      # Regression guard for the bug surfaced by Codex.AppServer role
+      # wiring: previously this populated `claude_code.command`
+      # unconditionally, even when `agent.kind: "codex"`, silently
+      # asking the codex runner to spawn `"claude"`. The fix is to
+      # leave `command: nil` — both runners fall back to their own
+      # `settings.<runner>.command` when role.command is unset.
+      assert role.command == nil
     end
 
     test "reviewer defaults to codex agent kind with no token override" do

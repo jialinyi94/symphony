@@ -85,10 +85,47 @@ defmodule SymphonyElixir.GitHub.Client do
   end
 
   @doc """
-  Fetch the combined commit status (CI) for a given sha. GitHub combines
-  legacy statuses + check-runs into a single conclusion at this endpoint.
+  Fetch the canonical CI status for a given commit sha.
 
-  Returns a normalized `PullRequest.ci_status()` atom.
+  GitHub today exposes CI through two parallel protocols and **neither
+  alone** covers all repos:
+
+    * Combined commit statuses (`GET /commits/:sha/status`) — the legacy
+      protocol used by external CI integrations (Travis CI, Render,
+      CircleCI via app, etc.). Returns `state ∈ success | failure |
+      pending`.
+    * Check runs (`GET /commits/:sha/check-runs`) — used by GitHub
+      Actions and modern Apps. Each run has a separate
+      `conclusion ∈ success | failure | neutral | skipped | cancelled |
+      timed_out | action_required | null` (null = in progress).
+
+  This function fetches BOTH and merges them via `merge_ci_signals/2`:
+
+    * `:failure` from either side dominates → `:failure`
+    * `:pending` from either side dominates over `:success` → `:pending`
+    * `:unknown` defers to the other signal
+
+  This is the single function callers should use for "is CI green?".
+  `fetch_combined_status/1` and `fetch_check_runs_conclusion/1` are
+  exposed individually for testing + special cases but production code
+  should compose via `fetch_ci_status/1`.
+  """
+  @spec fetch_ci_status(String.t()) :: {:ok, PullRequest.ci_status()} | {:error, term()}
+  def fetch_ci_status(sha) when is_binary(sha) do
+    combined = fetch_combined_status(sha)
+    checks = fetch_check_runs_conclusion(sha)
+
+    case {combined, checks} do
+      {{:ok, c}, {:ok, k}} -> {:ok, merge_ci_signals(c, k)}
+      {{:error, _} = err, _} -> err
+      {_, {:error, _} = err} -> err
+    end
+  end
+
+  @doc """
+  Fetch the combined commit-status state (legacy protocol). See
+  `fetch_ci_status/1` for the canonical CI signal that also covers
+  check runs.
   """
   @spec fetch_combined_status(String.t()) :: {:ok, PullRequest.ci_status()} | {:error, term()}
   def fetch_combined_status(sha) when is_binary(sha) do
@@ -115,6 +152,80 @@ defmodule SymphonyElixir.GitHub.Client do
       end
     end
   end
+
+  @doc """
+  Fetch GitHub Actions / Apps check-run conclusions for a commit sha and
+  aggregate them into a single `PullRequest.ci_status()` atom.
+
+  Aggregation rules (mirror `merge_ci_signals/2` in shape but operate on
+  per-run conclusion strings):
+
+    * Any failure-class conclusion (`failure`, `timed_out`,
+      `action_required`, `cancelled`) → `:failure`
+    * Any run still in progress (`conclusion == null`) → `:pending`
+    * All conclusions in non-failing set (`success`, `neutral`,
+      `skipped`) → `:success`
+    * Empty list (no check runs at all) → `:unknown`
+  """
+  @spec fetch_check_runs_conclusion(String.t()) ::
+          {:ok, PullRequest.ci_status()} | {:error, term()}
+  def fetch_check_runs_conclusion(sha) when is_binary(sha) do
+    settings = Config.settings!().tracker
+
+    with {:ok, headers} <- request_headers() do
+      url = "#{api_base()}/repos/#{repo!(settings)}/commits/#{sha}/check-runs"
+
+      case Req.get(url,
+             headers: headers,
+             params: [per_page: @per_page],
+             connect_options: [timeout: 30_000]
+           ) do
+        {:ok, %{status: 200, body: %{"check_runs" => runs}}} when is_list(runs) ->
+          {:ok, aggregate_check_runs(runs)}
+
+        {:ok, %{status: 200}} ->
+          {:ok, :unknown}
+
+        {:ok, %{status: 404}} ->
+          {:ok, :unknown}
+
+        {:ok, response} ->
+          {:error, {:github_http_error, response.status, summarize(response)}}
+
+        {:error, reason} ->
+          {:error, {:github_request_failed, reason}}
+      end
+    end
+  end
+
+  defp aggregate_check_runs([]), do: :unknown
+
+  defp aggregate_check_runs(runs) when is_list(runs) do
+    conclusions = Enum.map(runs, &Map.get(&1, "conclusion"))
+
+    cond do
+      Enum.any?(conclusions, &(&1 in ["failure", "timed_out", "action_required", "cancelled"])) ->
+        :failure
+
+      Enum.any?(conclusions, &is_nil/1) ->
+        :pending
+
+      Enum.all?(conclusions, &(&1 in ["success", "neutral", "skipped"])) ->
+        :success
+
+      true ->
+        :unknown
+    end
+  end
+
+  # Failure dominates; pending dominates success; unknown defers to the other signal.
+  defp merge_ci_signals(:failure, _), do: :failure
+  defp merge_ci_signals(_, :failure), do: :failure
+  defp merge_ci_signals(:pending, _), do: :pending
+  defp merge_ci_signals(_, :pending), do: :pending
+  defp merge_ci_signals(:unknown, x), do: x
+  defp merge_ci_signals(x, :unknown), do: x
+  defp merge_ci_signals(x, _), do: x
 
   defp normalize_pull_request(raw) when is_map(raw) do
     head = raw["head"] || %{}

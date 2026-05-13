@@ -75,7 +75,7 @@ defmodule SymphonyElixir.GitHub.AdapterWorkItemsTest do
        ]}
     )
 
-    ClientStub.set(:fetch_combined_status, {:ok, :success})
+    ClientStub.set(:fetch_ci_status, {:ok, :success})
     ClientStub.set(:fetch_sub_issues, {:ok, []})
 
     assert {:ok, items} = Adapter.fetch_work_items()
@@ -108,6 +108,34 @@ defmodule SymphonyElixir.GitHub.AdapterWorkItemsTest do
     assert WorkItem.metadata(wi, :has_sub_issues) == true
   end
 
+  test "fetch_work_items also stores the actual :sub_issue_numbers list (regression: PR #5 review)" do
+    # Reviewer-is-all-u-need flagged: dispatch_options/3 reads
+    # metadata.sub_issue_numbers but build_work_item_metadata previously
+    # only stored a boolean. This guards against regression.
+    ClientStub.set(:fetch_candidate_issues, {:ok, [issue("100", state: "Todo")]})
+    ClientStub.set(:fetch_open_pull_requests, {:ok, []})
+    ClientStub.set(:fetch_sub_issues, {:ok, [134, 135, 141]})
+
+    assert {:ok, [wi]} = Adapter.fetch_work_items()
+    assert WorkItem.metadata(wi, :sub_issue_numbers) == [134, 135, 141]
+
+    # End-to-end: Stage.dispatch_options should now emit :epic context.
+    alias SymphonyElixir.{Stage, StageResolver}
+    assert {:ok, %Stage{id: :issue_epic_plan} = stage} = StageResolver.resolve(wi, Stage.defaults())
+    assert {:ok, opts} = Stage.dispatch_options(stage, wi)
+    assert Keyword.fetch!(opts, :epic) == %{sub_issue_numbers: [134, 135, 141]}
+  end
+
+  test "sub_issue_numbers defaults to [] when fetch_sub_issues fails" do
+    ClientStub.set(:fetch_candidate_issues, {:ok, [issue("100", state: "Todo")]})
+    ClientStub.set(:fetch_open_pull_requests, {:ok, []})
+    ClientStub.set(:fetch_sub_issues, {:error, :network})
+
+    assert {:ok, [wi]} = Adapter.fetch_work_items()
+    assert WorkItem.metadata(wi, :has_sub_issues) == false
+    assert WorkItem.metadata(wi, :sub_issue_numbers) == []
+  end
+
   test "associate_prs_to_issues: branch-name fallback when PR body has no Closes link" do
     ClientStub.set(:fetch_candidate_issues, {:ok, [issue("134")]})
 
@@ -124,7 +152,7 @@ defmodule SymphonyElixir.GitHub.AdapterWorkItemsTest do
 
     ClientStub.set(:fetch_open_pull_requests, {:ok, [pr_no_link]})
     ClientStub.set(:fetch_pull_request_reviews, {:ok, []})
-    ClientStub.set(:fetch_combined_status, {:ok, :pending})
+    ClientStub.set(:fetch_ci_status, {:ok, :pending})
     ClientStub.set(:fetch_sub_issues, {:ok, []})
 
     assert {:ok, [wi]} = Adapter.fetch_work_items()

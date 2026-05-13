@@ -219,4 +219,129 @@ defmodule SymphonyElixir.GitHub.ClientTest do
       assert issue.assigned_to_worker == true
     end
   end
+
+  describe "fetch_check_runs_conclusion/1 + fetch_ci_status/1" do
+    setup do
+      bypass = Bypass.open()
+      prev = Application.get_env(:symphony_elixir, :github_api_base)
+      Application.put_env(:symphony_elixir, :github_api_base, "http://localhost:#{bypass.port}")
+
+      on_exit(fn ->
+        if prev do
+          Application.put_env(:symphony_elixir, :github_api_base, prev)
+        else
+          Application.delete_env(:symphony_elixir, :github_api_base)
+        end
+      end)
+
+      write_workflow_file!(Workflow.workflow_file_path(), @github_overrides)
+
+      %{bypass: bypass}
+    end
+
+    defp check_runs_resp(runs), do: Jason.encode!(%{"total_count" => length(runs), "check_runs" => runs})
+    defp run(conclusion), do: %{"id" => :rand.uniform(1_000_000), "conclusion" => conclusion}
+
+    test "check_runs all success → :success", %{bypass: bypass} do
+      Bypass.expect_once(bypass, "GET", "/repos/owner/name/commits/sha-1/check-runs", fn conn ->
+        json_resp(conn, 200, check_runs_resp([run("success"), run("success"), run("neutral")]))
+      end)
+
+      assert {:ok, :success} = Client.fetch_check_runs_conclusion("sha-1")
+    end
+
+    test "any failure-class conclusion → :failure", %{bypass: bypass} do
+      for conclusion <- ["failure", "timed_out", "action_required", "cancelled"] do
+        Bypass.expect_once(bypass, "GET", "/repos/owner/name/commits/sha-#{conclusion}/check-runs", fn conn ->
+          json_resp(conn, 200, check_runs_resp([run("success"), run(conclusion)]))
+        end)
+
+        assert {:ok, :failure} = Client.fetch_check_runs_conclusion("sha-#{conclusion}")
+      end
+    end
+
+    test "any null conclusion (in progress) → :pending", %{bypass: bypass} do
+      Bypass.expect_once(bypass, "GET", "/repos/owner/name/commits/sha-p/check-runs", fn conn ->
+        json_resp(conn, 200, check_runs_resp([run("success"), run(nil)]))
+      end)
+
+      assert {:ok, :pending} = Client.fetch_check_runs_conclusion("sha-p")
+    end
+
+    test "empty check_runs list → :unknown", %{bypass: bypass} do
+      Bypass.expect_once(bypass, "GET", "/repos/owner/name/commits/sha-empty/check-runs", fn conn ->
+        json_resp(conn, 200, check_runs_resp([]))
+      end)
+
+      assert {:ok, :unknown} = Client.fetch_check_runs_conclusion("sha-empty")
+    end
+
+    test "fetch_ci_status merges combined + check_runs: success + success = success", %{bypass: bypass} do
+      Bypass.expect_once(bypass, "GET", "/repos/owner/name/commits/sha-x/status", fn conn ->
+        json_resp(conn, 200, Jason.encode!(%{"state" => "success"}))
+      end)
+
+      Bypass.expect_once(bypass, "GET", "/repos/owner/name/commits/sha-x/check-runs", fn conn ->
+        json_resp(conn, 200, check_runs_resp([run("success")]))
+      end)
+
+      assert {:ok, :success} = Client.fetch_ci_status("sha-x")
+    end
+
+    test "fetch_ci_status: combined :pending + check_runs :failure → :failure", %{bypass: bypass} do
+      Bypass.expect_once(bypass, "GET", "/repos/owner/name/commits/sha-mix/status", fn conn ->
+        json_resp(conn, 200, Jason.encode!(%{"state" => "pending"}))
+      end)
+
+      Bypass.expect_once(bypass, "GET", "/repos/owner/name/commits/sha-mix/check-runs", fn conn ->
+        json_resp(conn, 200, check_runs_resp([run("failure")]))
+      end)
+
+      assert {:ok, :failure} = Client.fetch_ci_status("sha-mix")
+    end
+
+    test "fetch_ci_status: legacy-only repo (no check_runs, combined :success) → :success", %{bypass: bypass} do
+      Bypass.expect_once(bypass, "GET", "/repos/owner/name/commits/sha-legacy/status", fn conn ->
+        json_resp(conn, 200, Jason.encode!(%{"state" => "success"}))
+      end)
+
+      Bypass.expect_once(bypass, "GET", "/repos/owner/name/commits/sha-legacy/check-runs", fn conn ->
+        json_resp(conn, 200, check_runs_resp([]))
+      end)
+
+      assert {:ok, :success} = Client.fetch_ci_status("sha-legacy")
+    end
+
+    test "fetch_ci_status: Actions-only repo (combined empty, check_runs :success) → :success — regression for PR #5", %{bypass: bypass} do
+      # This was the original bug: combined commit-status API returns
+      # no state for Actions-only repos (alpha is one), so the previous
+      # fetch_combined_status path treated everything as :unknown and
+      # ci-gated stages (pr_record_proof) never unlocked. The merge
+      # logic should now propagate the :success from check_runs.
+      Bypass.expect_once(bypass, "GET", "/repos/owner/name/commits/sha-actions/status", fn conn ->
+        json_resp(conn, 200, Jason.encode!(%{"state" => nil}))
+      end)
+
+      Bypass.expect_once(bypass, "GET", "/repos/owner/name/commits/sha-actions/check-runs", fn conn ->
+        json_resp(conn, 200, check_runs_resp([run("success"), run("success")]))
+      end)
+
+      assert {:ok, :success} = Client.fetch_ci_status("sha-actions")
+    end
+
+    test "fetch_ci_status propagates errors from either underlying call", %{bypass: bypass} do
+      # Use 401 (auth error) — non-transient, so Req does not retry. 5xx
+      # would be retried per Req's default :safe_transient policy and
+      # Bypass.expect_once would not match the retries.
+      Bypass.expect_once(bypass, "GET", "/repos/owner/name/commits/sha-err/status", fn conn ->
+        json_resp(conn, 200, Jason.encode!(%{"state" => "success"}))
+      end)
+
+      Bypass.expect_once(bypass, "GET", "/repos/owner/name/commits/sha-err/check-runs", fn conn ->
+        json_resp(conn, 401, ~s({"message":"unauthorized"}))
+      end)
+
+      assert {:error, {:github_http_error, 401, _}} = Client.fetch_ci_status("sha-err")
+    end
+  end
 end

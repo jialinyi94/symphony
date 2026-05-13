@@ -185,13 +185,13 @@ defmodule SymphonyElixir.GitHub.Adapter do
   defp fetch_ci_status_or_unknown(nil), do: :unknown
 
   defp fetch_ci_status_or_unknown(sha) do
-    case client_module().fetch_combined_status(sha) do
+    case client_module().fetch_ci_status(sha) do
       {:ok, status} ->
         status
 
       {:error, reason} ->
         require Logger
-        Logger.warning("GitHub: fetch_combined_status(#{sha}) failed (#{inspect(reason)})")
+        Logger.warning("GitHub: fetch_ci_status(#{sha}) failed (#{inspect(reason)})")
         :unknown
     end
   end
@@ -218,17 +218,16 @@ defmodule SymphonyElixir.GitHub.Adapter do
   defp newer_review?(_, _), do: false
 
   defp build_work_item_metadata(%Issue{id: id} = _issue) when is_binary(id) do
-    %{has_sub_issues: has_sub_issues_for?(id)}
-  end
+    case client_module().fetch_sub_issues(id) do
+      {:ok, numbers} when is_list(numbers) ->
+        %{has_sub_issues: numbers != [], sub_issue_numbers: numbers}
 
-  defp build_work_item_metadata(_issue), do: %{}
-
-  defp has_sub_issues_for?(issue_id) do
-    case client_module().fetch_sub_issues(issue_id) do
-      {:ok, [_ | _]} -> true
-      _ -> false
+      _ ->
+        %{has_sub_issues: false, sub_issue_numbers: []}
     end
   end
+
+  defp build_work_item_metadata(_issue), do: %{has_sub_issues: false, sub_issue_numbers: []}
 
   @impl true
   def fetch_issues_by_states(states) do

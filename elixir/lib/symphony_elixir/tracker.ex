@@ -148,17 +148,14 @@ defmodule SymphonyElixir.Tracker do
   defp issue_to_work_item(other, _kind_atom), do: other
 
   defp adapter_kind_atom(mod) do
-    case mod.kind() do
-      kind when is_binary(kind) ->
-        case Enum.find([:github, :linear, :memory], fn k -> Atom.to_string(k) == kind end) do
-          nil -> :other
-          k -> k
-        end
-
-      _ ->
-        :other
-    end
+    mod.kind() |> kind_to_atom()
   end
+
+  defp kind_to_atom(kind) when is_binary(kind) do
+    Enum.find([:github, :linear, :memory], :other, fn k -> Atom.to_string(k) == kind end)
+  end
+
+  defp kind_to_atom(_), do: :other
 
   @doc """
   Returns the adapter module for the configured tracker kind, or an error

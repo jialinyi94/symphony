@@ -95,24 +95,23 @@ defmodule SymphonyElixir.GitHub.Adapter do
       prs = fetch_open_prs_or_warn()
       pr_by_issue_id = associate_prs_to_issues(prs, issues)
 
-      work_items =
-        Enum.map(issues, fn issue ->
-          attached_pr =
-            case Map.get(pr_by_issue_id, issue.id) do
-              %PullRequest{} = pr -> preload_pr_signals(pr)
-              _ -> nil
-            end
-
-          metadata = build_work_item_metadata(issue)
-
-          WorkItem.from_issue(issue,
-            tracker_kind: :github,
-            metadata: metadata,
-            attached_pr: attached_pr
-          )
-        end)
-
+      work_items = Enum.map(issues, &build_work_item(&1, pr_by_issue_id))
       {:ok, work_items}
+    end
+  end
+
+  defp build_work_item(issue, pr_by_issue_id) do
+    WorkItem.from_issue(issue,
+      tracker_kind: :github,
+      metadata: build_work_item_metadata(issue),
+      attached_pr: attached_pr_for(issue.id, pr_by_issue_id)
+    )
+  end
+
+  defp attached_pr_for(issue_id, pr_by_issue_id) do
+    case Map.get(pr_by_issue_id, issue_id) do
+      %PullRequest{} = pr -> preload_pr_signals(pr)
+      _ -> nil
     end
   end
 
@@ -197,14 +196,17 @@ defmodule SymphonyElixir.GitHub.Adapter do
   end
 
   defp latest_reviews_by_author(reviews) when is_list(reviews) do
-    reviews
-    |> Enum.reduce(%{}, fn
-      %PullRequest.Review{author_login: nil}, acc ->
-        acc
+    Enum.reduce(reviews, %{}, &fold_latest_review/2)
+  end
 
-      %PullRequest.Review{author_login: login} = r, acc ->
-        Map.update(acc, login, r, fn prev -> if newer_review?(r, prev), do: r, else: prev end)
-    end)
+  defp fold_latest_review(%PullRequest.Review{author_login: nil}, acc), do: acc
+
+  defp fold_latest_review(%PullRequest.Review{author_login: login} = r, acc) do
+    Map.update(acc, login, r, &keep_newer_review(r, &1))
+  end
+
+  defp keep_newer_review(candidate, current) do
+    if newer_review?(candidate, current), do: candidate, else: current
   end
 
   defp newer_review?(%PullRequest.Review{submitted_at: a}, %PullRequest.Review{submitted_at: b})

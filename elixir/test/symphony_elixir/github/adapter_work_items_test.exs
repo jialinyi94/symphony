@@ -2,8 +2,8 @@ defmodule SymphonyElixir.GitHub.AdapterWorkItemsTest do
   use ExUnit.Case, async: false
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.{PullRequest, WorkItem}
   alias SymphonyElixir.GitHub.{Adapter, ClientStub}
+  alias SymphonyElixir.{PullRequest, WorkItem}
   alias SymphonyElixir.PullRequest.Review
 
   setup do

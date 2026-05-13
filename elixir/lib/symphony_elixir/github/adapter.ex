@@ -9,7 +9,7 @@ defmodule SymphonyElixir.GitHub.Adapter do
 
   @behaviour SymphonyElixir.Tracker
 
-  alias SymphonyElixir.{Config, GitHub.Client, GitHub.EpicPlan, GitHub.StateMapping}
+  alias SymphonyElixir.{Config, GitHub.Client, GitHub.EpicPlan, GitHub.StateMapping, Issue, PullRequest, WorkItem}
 
   @impl true
   def kind, do: "github"
@@ -71,6 +71,162 @@ defmodule SymphonyElixir.GitHub.Adapter do
   def fetch_candidate_issues do
     with {:ok, raw_issues} <- client_module().fetch_candidate_issues() do
       {:ok, populate_blocked_by_from_plans(raw_issues)}
+    end
+  end
+
+  @doc """
+  Build the work-item stream: each candidate issue is paired with its
+  open PR (if any) and the PR's review + CI signals are preloaded.
+
+  Best-effort:
+
+    * If `fetch_open_pull_requests` fails, fall back to issue-only
+      WorkItems and log the error so the orchestrator can still make
+      progress on the issue side.
+    * If per-PR review/CI fetch fails, attach the PR with empty review
+      map / `:unknown` CI status — stage predicates degrade gracefully.
+
+  Pre-populates `metadata.has_sub_issues` so the epic-plan stage
+  predicate can fire without further IO during stage resolution.
+  """
+  @impl true
+  def fetch_work_items do
+    with {:ok, issues} <- fetch_candidate_issues() do
+      prs = fetch_open_prs_or_warn()
+      pr_by_issue_id = associate_prs_to_issues(prs, issues)
+
+      work_items =
+        Enum.map(issues, fn issue ->
+          attached_pr =
+            case Map.get(pr_by_issue_id, issue.id) do
+              %PullRequest{} = pr -> preload_pr_signals(pr)
+              _ -> nil
+            end
+
+          metadata = build_work_item_metadata(issue)
+
+          WorkItem.from_issue(issue,
+            tracker_kind: :github,
+            metadata: metadata,
+            attached_pr: attached_pr
+          )
+        end)
+
+      {:ok, work_items}
+    end
+  end
+
+  defp fetch_open_prs_or_warn do
+    case client_module().fetch_open_pull_requests() do
+      {:ok, prs} ->
+        prs
+
+      {:error, reason} ->
+        require Logger
+        Logger.warning("GitHub: fetch_open_pull_requests failed (#{inspect(reason)}); continuing with issue-only work items")
+        []
+    end
+  end
+
+  # Associate PRs to issues using two heuristics, in priority order:
+  #   1. `linked_issue_number` from PR body (Closes #N / Fixes #N)
+  #   2. branch-name pattern `symphony/issue-<N>` matches issue.identifier
+  defp associate_prs_to_issues(prs, issues) when is_list(prs) and is_list(issues) do
+    issue_ids_set = MapSet.new(issues, & &1.id)
+
+    Enum.reduce(prs, %{}, fn pr, acc ->
+      case associate_pr_to_issue_id(pr, issue_ids_set) do
+        nil -> acc
+        issue_id -> Map.put_new(acc, issue_id, pr)
+      end
+    end)
+  end
+
+  defp associate_pr_to_issue_id(%PullRequest{linked_issue_number: n}, issue_ids_set)
+       when is_integer(n) do
+    candidate = Integer.to_string(n)
+    if MapSet.member?(issue_ids_set, candidate), do: candidate, else: nil
+  end
+
+  defp associate_pr_to_issue_id(%PullRequest{head_ref: ref}, issue_ids_set) when is_binary(ref) do
+    case Regex.run(~r{^symphony/issue-(\d+)$}, ref) do
+      [_, num_str] ->
+        if MapSet.member?(issue_ids_set, num_str), do: num_str, else: nil
+
+      _ ->
+        nil
+    end
+  end
+
+  defp associate_pr_to_issue_id(_pr, _set), do: nil
+
+  defp preload_pr_signals(%PullRequest{number: number, head_sha: head_sha} = pr) do
+    reviews = fetch_reviews_or_empty(number)
+    latest_by_author = latest_reviews_by_author(reviews)
+    ci_status = fetch_ci_status_or_unknown(head_sha)
+
+    %{pr | reviews: reviews, latest_reviews_by_author: latest_by_author, ci_status: ci_status}
+  end
+
+  defp fetch_reviews_or_empty(nil), do: []
+
+  defp fetch_reviews_or_empty(number) do
+    case client_module().fetch_pull_request_reviews(number) do
+      {:ok, reviews} ->
+        reviews
+
+      {:error, reason} ->
+        require Logger
+        Logger.warning("GitHub: fetch_pull_request_reviews(#{number}) failed (#{inspect(reason)})")
+        []
+    end
+  end
+
+  defp fetch_ci_status_or_unknown(nil), do: :unknown
+
+  defp fetch_ci_status_or_unknown(sha) do
+    case client_module().fetch_combined_status(sha) do
+      {:ok, status} ->
+        status
+
+      {:error, reason} ->
+        require Logger
+        Logger.warning("GitHub: fetch_combined_status(#{sha}) failed (#{inspect(reason)})")
+        :unknown
+    end
+  end
+
+  defp latest_reviews_by_author(reviews) when is_list(reviews) do
+    reviews
+    |> Enum.reduce(%{}, fn
+      %PullRequest.Review{author_login: nil}, acc ->
+        acc
+
+      %PullRequest.Review{author_login: login} = r, acc ->
+        Map.update(acc, login, r, fn prev -> if newer_review?(r, prev), do: r, else: prev end)
+    end)
+  end
+
+  defp newer_review?(%PullRequest.Review{submitted_at: a}, %PullRequest.Review{submitted_at: b})
+       when not is_nil(a) and not is_nil(b),
+       do: DateTime.compare(a, b) == :gt
+
+  defp newer_review?(%PullRequest.Review{submitted_at: a}, %PullRequest.Review{submitted_at: nil})
+       when not is_nil(a),
+       do: true
+
+  defp newer_review?(_, _), do: false
+
+  defp build_work_item_metadata(%Issue{id: id} = _issue) when is_binary(id) do
+    %{has_sub_issues: has_sub_issues_for?(id)}
+  end
+
+  defp build_work_item_metadata(_issue), do: %{}
+
+  defp has_sub_issues_for?(issue_id) do
+    case client_module().fetch_sub_issues(issue_id) do
+      {:ok, [_ | _]} -> true
+      _ -> false
     end
   end
 

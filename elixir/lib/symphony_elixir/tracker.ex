@@ -8,7 +8,7 @@ defmodule SymphonyElixir.Tracker do
   `@adapters`; the orchestrator and config layers do not branch on kind.
   """
 
-  alias SymphonyElixir.Config
+  alias SymphonyElixir.{Config, Issue, WorkItem}
 
   @adapters [
     SymphonyElixir.Tracker.Memory,
@@ -25,11 +25,13 @@ defmodule SymphonyElixir.Tracker do
   @callback fetch_sub_issues(String.t()) :: {:ok, [integer()]} | {:error, term()}
   @callback fetch_plan(String.t()) :: {:ok, map() | nil} | {:error, term()}
 
+  @callback fetch_work_items() :: {:ok, [WorkItem.t()]} | {:error, term()}
+
   @callback kind() :: String.t()
   @callback validate_config(term()) :: :ok | {:error, term()}
   @callback secret_env_var() :: String.t() | nil
 
-  @optional_callbacks secret_env_var: 0, fetch_sub_issues: 1, fetch_plan: 1
+  @optional_callbacks secret_env_var: 0, fetch_sub_issues: 1, fetch_plan: 1, fetch_work_items: 0
 
   @spec adapters() :: [module()]
   def adapters, do: @adapters
@@ -103,6 +105,60 @@ defmodule SymphonyElixir.Tracker do
       else
         {:ok, nil}
       end
+    end
+  end
+
+  @doc """
+  Returns the canonical work-item stream for the configured tracker.
+
+  Adapters that implement `fetch_work_items/0` (currently: GitHub) return
+  WorkItems with attached PR + review + CI signals preloaded so stage
+  predicates can run without further IO.
+
+  Adapters that don't implement it fall back to wrapping
+  `fetch_candidate_issues/0` results in issue-only WorkItems — preserves
+  the existing dispatch semantics for Linear / Memory.
+  """
+  @spec fetch_work_items() :: {:ok, [WorkItem.t()]} | {:error, term()}
+  def fetch_work_items do
+    with {:ok, mod} <- adapter() do
+      cond do
+        function_exported?(mod, :fetch_work_items, 0) ->
+          mod.fetch_work_items()
+
+        true ->
+          fallback_work_items_from_issues(mod)
+      end
+    end
+  end
+
+  defp fallback_work_items_from_issues(mod) do
+    case mod.fetch_candidate_issues() do
+      {:ok, issues} ->
+        kind_atom = adapter_kind_atom(mod)
+        {:ok, Enum.map(issues, &issue_to_work_item(&1, kind_atom))}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp issue_to_work_item(%Issue{} = issue, kind_atom) do
+    WorkItem.from_issue(issue, tracker_kind: kind_atom)
+  end
+
+  defp issue_to_work_item(other, _kind_atom), do: other
+
+  defp adapter_kind_atom(mod) do
+    case mod.kind() do
+      kind when is_binary(kind) ->
+        case Enum.find([:github, :linear, :memory], fn k -> Atom.to_string(k) == kind end) do
+          nil -> :other
+          k -> k
+        end
+
+      _ ->
+        :other
     end
   end
 

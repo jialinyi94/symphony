@@ -8,7 +8,7 @@ defmodule SymphonyElixir.GitHub.Client do
   """
 
   require Logger
-  alias SymphonyElixir.{Config, GitHub.StateMapping, Issue}
+  alias SymphonyElixir.{Config, GitHub.StateMapping, Issue, PullRequest}
 
   @per_page 100
   @max_error_body_log_bytes 1_000
@@ -47,6 +47,137 @@ defmodule SymphonyElixir.GitHub.Client do
       end
     end
   end
+
+  @doc """
+  Fetch all open PRs on the configured repo as `PullRequest` structs.
+
+  Reviews and CI status are NOT preloaded here — callers compose those
+  via `fetch_pull_request_reviews/1` and `fetch_combined_status/1` to
+  keep this function's API surface predictable.
+  """
+  @spec fetch_open_pull_requests() :: {:ok, [PullRequest.t()]} | {:error, term()}
+  def fetch_open_pull_requests do
+    settings = Config.settings!().tracker
+
+    with {:ok, headers} <- request_headers(),
+         {:ok, raw_prs} <- do_paginate("#{api_base()}/repos/#{repo!(settings)}/pulls", headers, [state: "open"], 1, []) do
+      {:ok, Enum.map(raw_prs, &normalize_pull_request/1)}
+    end
+  end
+
+  @doc """
+  Fetch the list of reviews on a PR. Returned in chronological order so
+  callers can build a "latest review per author" view trivially.
+  """
+  @spec fetch_pull_request_reviews(pos_integer() | String.t()) ::
+          {:ok, [PullRequest.Review.t()]} | {:error, term()}
+  def fetch_pull_request_reviews(pr_number) do
+    settings = Config.settings!().tracker
+
+    with {:ok, headers} <- request_headers() do
+      url = "#{api_base()}/repos/#{repo!(settings)}/pulls/#{pr_number}/reviews"
+
+      case do_paginate(url, headers, [], 1, []) do
+        {:ok, raw} -> {:ok, Enum.map(raw, &normalize_review/1)}
+        {:error, _} = err -> err
+      end
+    end
+  end
+
+  @doc """
+  Fetch the combined commit status (CI) for a given sha. GitHub combines
+  legacy statuses + check-runs into a single conclusion at this endpoint.
+
+  Returns a normalized `PullRequest.ci_status()` atom.
+  """
+  @spec fetch_combined_status(String.t()) :: {:ok, PullRequest.ci_status()} | {:error, term()}
+  def fetch_combined_status(sha) when is_binary(sha) do
+    settings = Config.settings!().tracker
+
+    with {:ok, headers} <- request_headers() do
+      url = "#{api_base()}/repos/#{repo!(settings)}/commits/#{sha}/status"
+
+      case Req.get(url, headers: headers, connect_options: [timeout: 30_000]) do
+        {:ok, %{status: 200, body: %{"state" => state}}} ->
+          {:ok, normalize_ci_state(state)}
+
+        {:ok, %{status: 200}} ->
+          {:ok, :unknown}
+
+        {:ok, %{status: 404}} ->
+          {:ok, :unknown}
+
+        {:ok, response} ->
+          {:error, {:github_http_error, response.status, summarize(response)}}
+
+        {:error, reason} ->
+          {:error, {:github_request_failed, reason}}
+      end
+    end
+  end
+
+  defp normalize_pull_request(raw) when is_map(raw) do
+    head = raw["head"] || %{}
+
+    %PullRequest{
+      number: raw["number"],
+      head_sha: head["sha"],
+      head_ref: head["ref"],
+      state: normalize_pr_state(raw["state"], raw["merged_at"]),
+      draft: raw["draft"] == true,
+      url: raw["html_url"],
+      title: raw["title"],
+      body: raw["body"],
+      author_login: get_in(raw, ["user", "login"]),
+      linked_issue_number: extract_linked_issue_number(raw["body"]),
+      latest_reviews_by_author: %{},
+      reviews: [],
+      ci_status: :unknown,
+      created_at: parse_datetime(raw["created_at"]),
+      updated_at: parse_datetime(raw["updated_at"])
+    }
+  end
+
+  defp normalize_pr_state(_state, merged_at) when is_binary(merged_at), do: :merged
+  defp normalize_pr_state("open", _), do: :open
+  defp normalize_pr_state("closed", _), do: :closed
+  defp normalize_pr_state(_, _), do: :open
+
+  defp normalize_review(raw) when is_map(raw) do
+    %PullRequest.Review{
+      author_login: get_in(raw, ["user", "login"]),
+      state: PullRequest.Review.normalize_state(raw["state"]),
+      commit_id: raw["commit_id"],
+      submitted_at: parse_datetime(raw["submitted_at"]),
+      body: raw["body"]
+    }
+  end
+
+  defp normalize_ci_state("success"), do: :success
+  defp normalize_ci_state("failure"), do: :failure
+  defp normalize_ci_state("error"), do: :failure
+  defp normalize_ci_state("pending"), do: :pending
+  defp normalize_ci_state(_), do: :unknown
+
+  # Best-effort extraction of `Closes #N` / `Fixes #N` from PR body.
+  # Falls back to `nil` when the PR body doesn't reference an issue —
+  # the adapter then attaches the PR only when it can resolve the link
+  # via a branch-name heuristic instead.
+  @link_regex ~r/(?:closes|fixes|resolves)\s+#(\d+)/i
+  defp extract_linked_issue_number(body) when is_binary(body) do
+    case Regex.run(@link_regex, body) do
+      [_, num_str] ->
+        case Integer.parse(num_str) do
+          {n, _} -> n
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp extract_linked_issue_number(_), do: nil
 
   @spec fetch_sub_issues(String.t()) :: {:ok, [integer()]} | {:error, term()}
   def fetch_sub_issues(issue_id) when is_binary(issue_id) do

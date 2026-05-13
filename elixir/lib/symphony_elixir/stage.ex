@@ -130,6 +130,61 @@ defmodule SymphonyElixir.Stage do
   def terminal?(%__MODULE__{role: nil}), do: true
   def terminal?(_), do: false
 
+  @doc """
+  Map a resolved stage + WorkItem into the keyword opts list expected by
+  `SymphonyElixir.AgentRunner.run/3`.
+
+  This is the single bridge between the stage abstraction and the
+  existing AgentRunner API. The orchestrator integration uses this to
+  build `run_opts` instead of the legacy `epic_classification` path:
+
+      {:ok, stage} = StageResolver.resolve(work_item, Stage.defaults())
+      opts = Stage.dispatch_options(stage, work_item, base_opts)
+      AgentRunner.run(work_item.issue, recipient, opts)
+
+  Returns `{:skip, stage}` for terminal stages (role: nil) so callers
+  can early-exit dispatch.
+
+  Preserved keys from `base_opts`: `:attempt`, `:worker_host`, plus
+  anything else the caller wants threaded through.
+
+  Stage-derived keys:
+
+    * `:variant`     — `stage.prompt_variant`
+    * `:role`        — `stage.role`
+    * `:max_turns`   — when `stage.max_turns` is set
+    * `:epic`        — when stage is `:issue_epic_plan` and metadata
+                       has `:sub_issue_numbers`
+    * `:stage_id`    — `stage.id` (for logging / dashboard)
+  """
+  @spec dispatch_options(t(), WorkItem.t()) :: {:ok, keyword()} | {:skip, t()}
+  def dispatch_options(stage, work_item), do: dispatch_options(stage, work_item, [])
+
+  @spec dispatch_options(t(), WorkItem.t(), keyword()) :: {:ok, keyword()} | {:skip, t()}
+  def dispatch_options(%__MODULE__{role: nil} = stage, %WorkItem{}, _base_opts), do: {:skip, stage}
+
+  def dispatch_options(%__MODULE__{} = stage, %WorkItem{} = wi, base_opts) when is_list(base_opts) do
+    opts =
+      base_opts
+      |> Keyword.put(:variant, stage.prompt_variant)
+      |> Keyword.put(:role, stage.role)
+      |> Keyword.put(:stage_id, stage.id)
+      |> maybe_put(:max_turns, stage.max_turns)
+      |> maybe_put(:epic, epic_context_from_metadata(wi))
+
+    {:ok, opts}
+  end
+
+  defp maybe_put(opts, _key, nil), do: opts
+  defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
+
+  defp epic_context_from_metadata(%WorkItem{} = wi) do
+    case WorkItem.metadata(wi, :sub_issue_numbers) do
+      numbers when is_list(numbers) and numbers != [] -> %{sub_issue_numbers: numbers}
+      _ -> nil
+    end
+  end
+
   defp epic_plan_stage do
     %__MODULE__{
       id: :issue_epic_plan,

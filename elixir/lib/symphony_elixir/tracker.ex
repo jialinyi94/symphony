@@ -122,12 +122,10 @@ defmodule SymphonyElixir.Tracker do
   @spec fetch_work_items() :: {:ok, [WorkItem.t()]} | {:error, term()}
   def fetch_work_items do
     with {:ok, mod} <- adapter() do
-      cond do
-        function_exported?(mod, :fetch_work_items, 0) ->
-          mod.fetch_work_items()
-
-        true ->
-          fallback_work_items_from_issues(mod)
+      if function_exported?(mod, :fetch_work_items, 0) do
+        mod.fetch_work_items()
+      else
+        fallback_work_items_from_issues(mod)
       end
     end
   end

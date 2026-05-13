@@ -4,6 +4,7 @@ defmodule SymphonyElixir.Config do
   """
 
   alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.Role
   alias SymphonyElixir.Workflow
 
   @default_prompt_template """
@@ -69,6 +70,56 @@ defmodule SymphonyElixir.Config do
 
       {:error, reason} ->
         raise ArgumentError, message: "Invalid codex turn sandbox policy: #{inspect(reason)}"
+    end
+  end
+
+  @doc """
+  Resolve a Role by id, falling back to a sensible default when not
+  configured in `WORKFLOW.md`'s `roles:` block.
+
+  Defaults (when role id is not configured):
+
+    * `"implementer"` — uses the top-level `agent.kind` + the matching
+      `claude_code.command` / `codex.command` (i.e. the pre-roles
+      behavior). No identity injection.
+    * `"reviewer"`    — `agent_kind: "codex"`, command + token env unset.
+      A reviewer role needs explicit configuration to actually run a
+      separate identity; an unconfigured reviewer falls through to the
+      parent's auth context (same as implementer at the runtime layer).
+    * other ids       — generic `agent_kind: "claude_code"` defaults.
+  """
+  @spec role(String.t() | atom()) :: Role.t()
+  def role(role_id) when is_atom(role_id), do: role(Atom.to_string(role_id))
+
+  def role(role_id) when is_binary(role_id) do
+    case Map.get(settings!().roles || %{}, role_id) do
+      nil -> default_role(role_id)
+      raw -> Role.from_config(role_id, raw)
+    end
+  end
+
+  defp default_role("implementer") do
+    s = settings!()
+
+    %Role{
+      id: "implementer",
+      agent_kind: s.agent.kind || "claude_code",
+      command: claude_code_command_or_nil(s)
+    }
+  end
+
+  defp default_role("reviewer") do
+    %Role{id: "reviewer", agent_kind: "codex"}
+  end
+
+  defp default_role(other) do
+    %Role{id: other}
+  end
+
+  defp claude_code_command_or_nil(settings) do
+    case settings.claude_code do
+      %{command: command} when is_binary(command) and command != "" -> command
+      _ -> nil
     end
   end
 

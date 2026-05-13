@@ -134,18 +134,37 @@ defmodule SymphonyElixir.Tracker do
     case mod.fetch_candidate_issues() do
       {:ok, issues} ->
         kind_atom = adapter_kind_atom(mod)
-        {:ok, Enum.map(issues, &issue_to_work_item(&1, kind_atom))}
+        {:ok, Enum.map(issues, &issue_to_work_item(&1, kind_atom, mod))}
 
       {:error, _} = err ->
         err
     end
   end
 
-  defp issue_to_work_item(%Issue{} = issue, kind_atom) do
-    WorkItem.from_issue(issue, tracker_kind: kind_atom)
+  defp issue_to_work_item(%Issue{} = issue, kind_atom, mod) do
+    WorkItem.from_issue(issue,
+      tracker_kind: kind_atom,
+      metadata: fallback_metadata(issue, mod)
+    )
   end
 
-  defp issue_to_work_item(other, _kind_atom), do: other
+  defp issue_to_work_item(other, _kind_atom, _mod), do: other
+
+  defp fallback_metadata(%Issue{id: id}, mod) when is_binary(id) do
+    if function_exported?(mod, :fetch_sub_issues, 1) do
+      case mod.fetch_sub_issues(id) do
+        {:ok, numbers} when is_list(numbers) ->
+          %{has_sub_issues: numbers != [], sub_issue_numbers: numbers}
+
+        _ ->
+          %{has_sub_issues: false, sub_issue_numbers: []}
+      end
+    else
+      %{has_sub_issues: false, sub_issue_numbers: []}
+    end
+  end
+
+  defp fallback_metadata(_issue, _mod), do: %{has_sub_issues: false, sub_issue_numbers: []}
 
   defp adapter_kind_atom(mod) do
     mod.kind() |> kind_to_atom()

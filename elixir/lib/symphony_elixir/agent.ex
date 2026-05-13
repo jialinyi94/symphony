@@ -22,7 +22,7 @@ defmodule SymphonyElixir.Agent do
   See SPEC.md §"Codex App Server contract" for the inherited assumptions.
   """
 
-  alias SymphonyElixir.Config
+  alias SymphonyElixir.{Config, Role}
 
   @callback start_session(workspace :: String.t(), opts :: keyword()) ::
               {:ok, session :: term()} | {:error, term()}
@@ -33,20 +33,58 @@ defmodule SymphonyElixir.Agent do
   @callback stop_session(session :: term()) :: :ok
 
   @spec start_session(String.t(), keyword()) :: {:ok, term()} | {:error, term()}
-  def start_session(workspace, opts \\ []), do: adapter().start_session(workspace, opts)
+  def start_session(workspace, opts \\ []) do
+    adapter = pick_adapter(opts)
 
-  @spec run_turn(term(), String.t(), struct(), keyword()) :: {:ok, map()} | {:error, term()}
-  def run_turn(session, prompt, issue, opts \\ []),
-    do: adapter().run_turn(session, prompt, issue, opts)
-
-  @spec stop_session(term()) :: :ok
-  def stop_session(session), do: adapter().stop_session(session)
-
-  @spec adapter() :: module()
-  def adapter do
-    case Config.settings!().agent.kind do
-      "claude_code" -> SymphonyElixir.ClaudeCode.Runner
-      _ -> SymphonyElixir.Codex.AppServer
+    case adapter.start_session(workspace, opts) do
+      {:ok, inner} -> {:ok, %{__adapter__: adapter, inner: inner}}
+      other -> other
     end
   end
+
+  @spec run_turn(term(), String.t(), struct()) :: {:ok, map()} | {:error, term()}
+  def run_turn(session, prompt, issue), do: run_turn(session, prompt, issue, [])
+
+  @spec run_turn(term(), String.t(), struct(), keyword()) :: {:ok, map()} | {:error, term()}
+  def run_turn(%{__adapter__: adapter, inner: inner}, prompt, issue, opts) do
+    adapter.run_turn(inner, prompt, issue, opts)
+  end
+
+  def run_turn(session, prompt, issue, opts) do
+    pick_adapter(opts).run_turn(session, prompt, issue, opts)
+  end
+
+  @spec stop_session(term()) :: :ok
+  def stop_session(%{__adapter__: adapter, inner: inner}), do: adapter.stop_session(inner)
+  def stop_session(session), do: adapter().stop_session(session)
+
+  @doc """
+  Returns the runner module for the global `agent.kind` setting.
+
+  Kept for callers that don't have a `Role` in hand (legacy tests).
+  Production dispatch threads a role through `start_session/2` via
+  `opts[:role]`; see `adapter_for_role/1`.
+  """
+  @spec adapter() :: module()
+  def adapter do
+    agent_kind_module(Config.settings!().agent.kind || "claude_code")
+  end
+
+  @doc """
+  Pick the runner module for a given `Role` based on its `:agent_kind`.
+  """
+  @spec adapter_for_role(Role.t()) :: module()
+  def adapter_for_role(%Role{agent_kind: kind}), do: agent_kind_module(kind)
+  def adapter_for_role(_), do: adapter()
+
+  defp pick_adapter(opts) do
+    case Keyword.get(opts, :role) do
+      %Role{} = role -> adapter_for_role(role)
+      _ -> adapter()
+    end
+  end
+
+  defp agent_kind_module("claude_code"), do: SymphonyElixir.ClaudeCode.Runner
+  defp agent_kind_module("codex"), do: SymphonyElixir.Codex.AppServer
+  defp agent_kind_module(_), do: SymphonyElixir.Codex.AppServer
 end

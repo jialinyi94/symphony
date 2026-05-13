@@ -135,6 +135,15 @@ defmodule SymphonyElixir.GitHub.Client do
       url = "#{api_base()}/repos/#{repo!(settings)}/commits/#{sha}/status"
 
       case Req.get(url, headers: headers, connect_options: [timeout: 30_000]) do
+        # Empty `statuses` list means no legacy commit-status integration
+        # is reporting on this commit at all. The endpoint still returns
+        # state: "pending" in that case (verified empirically on
+        # Actions-only repos), but that "pending" is a phantom signal —
+        # there are no underlying statuses to wait on. Treat as :unknown
+        # so `merge_ci_signals/2` defers to the check-runs side.
+        {:ok, %{status: 200, body: %{"statuses" => []}}} ->
+          {:ok, :unknown}
+
         {:ok, %{status: 200, body: %{"state" => state}}} ->
           {:ok, normalize_ci_state(state)}
 

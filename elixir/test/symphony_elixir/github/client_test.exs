@@ -312,14 +312,16 @@ defmodule SymphonyElixir.GitHub.ClientTest do
       assert {:ok, :success} = Client.fetch_ci_status("sha-legacy")
     end
 
-    test "fetch_ci_status: Actions-only repo (combined empty, check_runs :success) → :success — regression for PR #5", %{bypass: bypass} do
-      # This was the original bug: combined commit-status API returns
-      # no state for Actions-only repos (alpha is one), so the previous
-      # fetch_combined_status path treated everything as :unknown and
-      # ci-gated stages (pr_record_proof) never unlocked. The merge
-      # logic should now propagate the :success from check_runs.
+    test "fetch_ci_status: Actions-only repo (combined returns phantom pending with empty statuses, check_runs :success) → :success — regression for PR #5", %{bypass: bypass} do
+      # The ACTUAL response shape from GitHub on Actions-only repos
+      # (empirically verified by reviewer-is-all-u-need on this PR head):
+      # `{"state": "pending", "statuses": []}` — NOT `state: nil`. The
+      # first version of this test mocked `state: nil` and so happened
+      # to pass against a broken implementation. fetch_combined_status
+      # now detects empty `statuses` and returns :unknown so check-runs
+      # can win the merge.
       Bypass.expect_once(bypass, "GET", "/repos/owner/name/commits/sha-actions/status", fn conn ->
-        json_resp(conn, 200, Jason.encode!(%{"state" => nil}))
+        json_resp(conn, 200, Jason.encode!(%{"state" => "pending", "statuses" => []}))
       end)
 
       Bypass.expect_once(bypass, "GET", "/repos/owner/name/commits/sha-actions/check-runs", fn conn ->
@@ -327,6 +329,33 @@ defmodule SymphonyElixir.GitHub.ClientTest do
       end)
 
       assert {:ok, :success} = Client.fetch_ci_status("sha-actions")
+    end
+
+    test "fetch_combined_status: phantom 'pending' with empty statuses → :unknown (not :pending)", %{bypass: bypass} do
+      Bypass.expect_once(bypass, "GET", "/repos/owner/name/commits/sha-empty/status", fn conn ->
+        json_resp(conn, 200, Jason.encode!(%{"state" => "pending", "statuses" => []}))
+      end)
+
+      assert {:ok, :unknown} = Client.fetch_combined_status("sha-empty")
+    end
+
+    test "fetch_combined_status: real pending state with at least one status → :pending", %{bypass: bypass} do
+      # Sanity check: when there IS a real underlying status integration
+      # reporting pending, we propagate :pending (NOT swallow into :unknown).
+      Bypass.expect_once(bypass, "GET", "/repos/owner/name/commits/sha-real-pending/status", fn conn ->
+        json_resp(
+          conn,
+          200,
+          Jason.encode!(%{
+            "state" => "pending",
+            "statuses" => [
+              %{"context" => "ci/circleci", "state" => "pending"}
+            ]
+          })
+        )
+      end)
+
+      assert {:ok, :pending} = Client.fetch_combined_status("sha-real-pending")
     end
 
     test "fetch_ci_status propagates errors from either underlying call", %{bypass: bypass} do

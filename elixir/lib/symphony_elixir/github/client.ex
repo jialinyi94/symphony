@@ -8,7 +8,7 @@ defmodule SymphonyElixir.GitHub.Client do
   """
 
   require Logger
-  alias SymphonyElixir.{Config, GitHub.StateMapping, Issue}
+  alias SymphonyElixir.{Config, GitHub.StateMapping, Issue, PullRequest}
 
   @per_page 100
   @max_error_body_log_bytes 1_000
@@ -47,6 +47,257 @@ defmodule SymphonyElixir.GitHub.Client do
       end
     end
   end
+
+  @doc """
+  Fetch all open PRs on the configured repo as `PullRequest` structs.
+
+  Reviews and CI status are NOT preloaded here — callers compose those
+  via `fetch_pull_request_reviews/1` and `fetch_combined_status/1` to
+  keep this function's API surface predictable.
+  """
+  @spec fetch_open_pull_requests() :: {:ok, [PullRequest.t()]} | {:error, term()}
+  def fetch_open_pull_requests do
+    settings = Config.settings!().tracker
+
+    with {:ok, headers} <- request_headers(),
+         {:ok, raw_prs} <- do_paginate("#{api_base()}/repos/#{repo!(settings)}/pulls", headers, [state: "open"], 1, []) do
+      {:ok, Enum.map(raw_prs, &normalize_pull_request/1)}
+    end
+  end
+
+  @doc """
+  Fetch the list of reviews on a PR. Returned in chronological order so
+  callers can build a "latest review per author" view trivially.
+  """
+  @spec fetch_pull_request_reviews(pos_integer() | String.t()) ::
+          {:ok, [PullRequest.Review.t()]} | {:error, term()}
+  def fetch_pull_request_reviews(pr_number) do
+    settings = Config.settings!().tracker
+
+    with {:ok, headers} <- request_headers() do
+      url = "#{api_base()}/repos/#{repo!(settings)}/pulls/#{pr_number}/reviews"
+
+      case do_paginate(url, headers, [], 1, []) do
+        {:ok, raw} -> {:ok, Enum.map(raw, &normalize_review/1)}
+        {:error, _} = err -> err
+      end
+    end
+  end
+
+  @doc """
+  Fetch the canonical CI status for a given commit sha.
+
+  GitHub today exposes CI through two parallel protocols and **neither
+  alone** covers all repos:
+
+    * Combined commit statuses (`GET /commits/:sha/status`) — the legacy
+      protocol used by external CI integrations (Travis CI, Render,
+      CircleCI via app, etc.). Returns `state ∈ success | failure |
+      pending`.
+    * Check runs (`GET /commits/:sha/check-runs`) — used by GitHub
+      Actions and modern Apps. Each run has a separate
+      `conclusion ∈ success | failure | neutral | skipped | cancelled |
+      timed_out | action_required | null` (null = in progress).
+
+  This function fetches BOTH and merges them via `merge_ci_signals/2`:
+
+    * `:failure` from either side dominates → `:failure`
+    * `:pending` from either side dominates over `:success` → `:pending`
+    * `:unknown` defers to the other signal
+
+  This is the single function callers should use for "is CI green?".
+  `fetch_combined_status/1` and `fetch_check_runs_conclusion/1` are
+  exposed individually for testing + special cases but production code
+  should compose via `fetch_ci_status/1`.
+  """
+  @spec fetch_ci_status(String.t()) :: {:ok, PullRequest.ci_status()} | {:error, term()}
+  def fetch_ci_status(sha) when is_binary(sha) do
+    combined = fetch_combined_status(sha)
+    checks = fetch_check_runs_conclusion(sha)
+
+    case {combined, checks} do
+      {{:ok, c}, {:ok, k}} -> {:ok, merge_ci_signals(c, k)}
+      {{:error, _} = err, _} -> err
+      {_, {:error, _} = err} -> err
+    end
+  end
+
+  @doc """
+  Fetch the combined commit-status state (legacy protocol). See
+  `fetch_ci_status/1` for the canonical CI signal that also covers
+  check runs.
+  """
+  @spec fetch_combined_status(String.t()) :: {:ok, PullRequest.ci_status()} | {:error, term()}
+  def fetch_combined_status(sha) when is_binary(sha) do
+    settings = Config.settings!().tracker
+
+    with {:ok, headers} <- request_headers() do
+      url = "#{api_base()}/repos/#{repo!(settings)}/commits/#{sha}/status"
+
+      case Req.get(url, headers: headers, connect_options: [timeout: 30_000]) do
+        # Empty `statuses` list means no legacy commit-status integration
+        # is reporting on this commit at all. The endpoint still returns
+        # state: "pending" in that case (verified empirically on
+        # Actions-only repos), but that "pending" is a phantom signal —
+        # there are no underlying statuses to wait on. Treat as :unknown
+        # so `merge_ci_signals/2` defers to the check-runs side.
+        {:ok, %{status: 200, body: %{"statuses" => []}}} ->
+          {:ok, :unknown}
+
+        {:ok, %{status: 200, body: %{"state" => state}}} ->
+          {:ok, normalize_ci_state(state)}
+
+        {:ok, %{status: 200}} ->
+          {:ok, :unknown}
+
+        {:ok, %{status: 404}} ->
+          {:ok, :unknown}
+
+        {:ok, response} ->
+          {:error, {:github_http_error, response.status, summarize(response)}}
+
+        {:error, reason} ->
+          {:error, {:github_request_failed, reason}}
+      end
+    end
+  end
+
+  @doc """
+  Fetch GitHub Actions / Apps check-run conclusions for a commit sha and
+  aggregate them into a single `PullRequest.ci_status()` atom.
+
+  Aggregation rules (mirror `merge_ci_signals/2` in shape but operate on
+  per-run conclusion strings):
+
+    * Any failure-class conclusion (`failure`, `timed_out`,
+      `action_required`, `cancelled`) → `:failure`
+    * Any run still in progress (`conclusion == null`) → `:pending`
+    * All conclusions in non-failing set (`success`, `neutral`,
+      `skipped`) → `:success`
+    * Empty list (no check runs at all) → `:unknown`
+  """
+  @spec fetch_check_runs_conclusion(String.t()) ::
+          {:ok, PullRequest.ci_status()} | {:error, term()}
+  def fetch_check_runs_conclusion(sha) when is_binary(sha) do
+    settings = Config.settings!().tracker
+
+    with {:ok, headers} <- request_headers() do
+      url = "#{api_base()}/repos/#{repo!(settings)}/commits/#{sha}/check-runs"
+
+      case Req.get(url,
+             headers: headers,
+             params: [per_page: @per_page],
+             connect_options: [timeout: 30_000]
+           ) do
+        {:ok, %{status: 200, body: %{"check_runs" => runs}}} when is_list(runs) ->
+          {:ok, aggregate_check_runs(runs)}
+
+        {:ok, %{status: 200}} ->
+          {:ok, :unknown}
+
+        {:ok, %{status: 404}} ->
+          {:ok, :unknown}
+
+        {:ok, response} ->
+          {:error, {:github_http_error, response.status, summarize(response)}}
+
+        {:error, reason} ->
+          {:error, {:github_request_failed, reason}}
+      end
+    end
+  end
+
+  defp aggregate_check_runs([]), do: :unknown
+
+  defp aggregate_check_runs(runs) when is_list(runs) do
+    conclusions = Enum.map(runs, &Map.get(&1, "conclusion"))
+
+    cond do
+      Enum.any?(conclusions, &(&1 in ["failure", "timed_out", "action_required", "cancelled"])) ->
+        :failure
+
+      Enum.any?(conclusions, &is_nil/1) ->
+        :pending
+
+      Enum.all?(conclusions, &(&1 in ["success", "neutral", "skipped"])) ->
+        :success
+
+      true ->
+        :unknown
+    end
+  end
+
+  # Failure dominates; pending dominates success; unknown defers to the other signal.
+  defp merge_ci_signals(:failure, _), do: :failure
+  defp merge_ci_signals(_, :failure), do: :failure
+  defp merge_ci_signals(:pending, _), do: :pending
+  defp merge_ci_signals(_, :pending), do: :pending
+  defp merge_ci_signals(:unknown, x), do: x
+  defp merge_ci_signals(x, :unknown), do: x
+  defp merge_ci_signals(x, _), do: x
+
+  defp normalize_pull_request(raw) when is_map(raw) do
+    head = raw["head"] || %{}
+
+    %PullRequest{
+      number: raw["number"],
+      head_sha: head["sha"],
+      head_ref: head["ref"],
+      state: normalize_pr_state(raw["state"], raw["merged_at"]),
+      draft: raw["draft"] == true,
+      url: raw["html_url"],
+      title: raw["title"],
+      body: raw["body"],
+      author_login: get_in(raw, ["user", "login"]),
+      linked_issue_number: extract_linked_issue_number(raw["body"]),
+      latest_reviews_by_author: %{},
+      reviews: [],
+      ci_status: :unknown,
+      created_at: parse_datetime(raw["created_at"]),
+      updated_at: parse_datetime(raw["updated_at"])
+    }
+  end
+
+  defp normalize_pr_state(_state, merged_at) when is_binary(merged_at), do: :merged
+  defp normalize_pr_state("open", _), do: :open
+  defp normalize_pr_state("closed", _), do: :closed
+  defp normalize_pr_state(_, _), do: :open
+
+  defp normalize_review(raw) when is_map(raw) do
+    %PullRequest.Review{
+      author_login: get_in(raw, ["user", "login"]),
+      state: PullRequest.Review.normalize_state(raw["state"]),
+      commit_id: raw["commit_id"],
+      submitted_at: parse_datetime(raw["submitted_at"]),
+      body: raw["body"]
+    }
+  end
+
+  defp normalize_ci_state("success"), do: :success
+  defp normalize_ci_state("failure"), do: :failure
+  defp normalize_ci_state("error"), do: :failure
+  defp normalize_ci_state("pending"), do: :pending
+  defp normalize_ci_state(_), do: :unknown
+
+  # Best-effort extraction of `Closes #N` / `Fixes #N` from PR body.
+  # Falls back to `nil` when the PR body doesn't reference an issue —
+  # the adapter then attaches the PR only when it can resolve the link
+  # via a branch-name heuristic instead.
+  @link_regex ~r/(?:closes|fixes|resolves)\s+#(\d+)/i
+  defp extract_linked_issue_number(body) when is_binary(body) do
+    case Regex.run(@link_regex, body) do
+      [_, num_str] ->
+        case Integer.parse(num_str) do
+          {n, _} -> n
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp extract_linked_issue_number(_), do: nil
 
   @spec fetch_sub_issues(String.t()) :: {:ok, [integer()]} | {:error, term()}
   def fetch_sub_issues(issue_id) when is_binary(issue_id) do

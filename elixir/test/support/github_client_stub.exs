@@ -15,7 +15,12 @@ defmodule SymphonyElixir.GitHub.ClientStub do
     :fetch_sub_issues,
     :fetch_issue_comments,
     :create_comment,
-    :set_labels_and_state
+    :set_labels_and_state,
+    :fetch_open_pull_requests,
+    :fetch_pull_request_reviews,
+    :fetch_combined_status,
+    :fetch_check_runs_conclusion,
+    :fetch_ci_status
   ]
 
   @spec set(atom(), term()) :: :ok
@@ -39,6 +44,11 @@ defmodule SymphonyElixir.GitHub.ClientStub do
   def fetch_issue_comments(_issue_id), do: lookup!(:fetch_issue_comments)
   def create_comment(_id, _body), do: lookup!(:create_comment)
   def set_labels_and_state(_id, _labels, _state), do: lookup!(:set_labels_and_state)
+  def fetch_open_pull_requests, do: lookup!(:fetch_open_pull_requests)
+  def fetch_pull_request_reviews(_pr_number), do: lookup!(:fetch_pull_request_reviews)
+  def fetch_combined_status(_sha), do: lookup!(:fetch_combined_status)
+  def fetch_check_runs_conclusion(_sha), do: lookup!(:fetch_check_runs_conclusion)
+  def fetch_ci_status(_sha), do: lookup!(:fetch_ci_status)
 
   @spec sample_issue(keyword()) :: Issue.t()
   def sample_issue(overrides \\ []) do

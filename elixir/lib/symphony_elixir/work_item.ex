@@ -12,7 +12,7 @@ defmodule SymphonyElixir.WorkItem do
   of predicates lets `StageResolver` stay a pure function.
   """
 
-  alias SymphonyElixir.Issue
+  alias SymphonyElixir.{Issue, PullRequest}
 
   defstruct [
     :tracker_kind,
@@ -23,17 +23,14 @@ defmodule SymphonyElixir.WorkItem do
 
   @type tracker_kind :: atom() | nil
 
-  @type attached_pr :: %{
-          optional(:number) => pos_integer(),
-          optional(:head_sha) => String.t(),
-          optional(:reviews) => [map()],
-          optional(:url) => String.t()
-        }
+  # Permissive: accepts either a `PullRequest.t()` (preferred — used by the
+  # GitHub adapter from PR3 forward) or a raw map (legacy / test fixtures).
+  @type attached_pr :: PullRequest.t() | map() | nil
 
   @type t :: %__MODULE__{
           tracker_kind: tracker_kind(),
           issue: Issue.t() | nil,
-          attached_pr: attached_pr() | nil,
+          attached_pr: attached_pr(),
           metadata: map()
         }
 
@@ -88,13 +85,32 @@ defmodule SymphonyElixir.WorkItem do
 
   @doc """
   True when this WorkItem has an attached PR (review-phase work).
-
-  PR1: always returns `false` since the Tracker does not yet populate
-  `attached_pr`. PR3 will start producing WorkItems with PR metadata.
   """
   @spec has_attached_pr?(t()) :: boolean()
   def has_attached_pr?(%__MODULE__{attached_pr: nil}), do: false
   def has_attached_pr?(%__MODULE__{attached_pr: _pr}), do: true
+
+  @doc """
+  Returns the attached PullRequest struct when present, otherwise `nil`.
+
+  Raw-map attachments (test fixtures / older code paths) are NOT
+  promoted to PullRequest — callers that need a struct should produce
+  one upstream. This keeps the helper unambiguous.
+  """
+  @spec pull_request(t()) :: PullRequest.t() | nil
+  def pull_request(%__MODULE__{attached_pr: %PullRequest{} = pr}), do: pr
+  def pull_request(_), do: nil
+
+  @doc """
+  Convenience predicate: PR is attached, open, and not draft.
+  """
+  @spec pr_open_for_review?(t()) :: boolean()
+  def pr_open_for_review?(%__MODULE__{} = wi) do
+    case pull_request(wi) do
+      %PullRequest{state: :open, draft: draft} -> draft != true
+      _ -> false
+    end
+  end
 
   @doc """
   Read a value from the metadata map with a default.

@@ -34,16 +34,23 @@ defmodule SymphonyElixir.StageTest do
     end
   end
 
-  describe "defaults/0" do
-    test "returns issue_epic_plan and issue_implement, in that order" do
-      [first, second] = Stage.defaults()
+  defp stage_by_id(id) do
+    Enum.find(Stage.defaults(), &(&1.id == id))
+  end
 
-      assert first.id == :issue_epic_plan
-      assert second.id == :issue_implement
+  describe "defaults/0" do
+    test "includes issue_epic_plan and issue_implement" do
+      ids = Enum.map(Stage.defaults(), & &1.id)
+      assert :issue_epic_plan in ids
+      assert :issue_implement in ids
+    end
+
+    test "issue_implement is the last (catch-all) entry" do
+      assert List.last(Stage.defaults()).id == :issue_implement
     end
 
     test "issue_epic_plan has :epic_planner variant, role implementer, max_turns 4" do
-      [epic_plan, _] = Stage.defaults()
+      epic_plan = stage_by_id(:issue_epic_plan)
 
       assert epic_plan.role == :implementer
       assert epic_plan.prompt_variant == :epic_planner
@@ -51,7 +58,7 @@ defmodule SymphonyElixir.StageTest do
     end
 
     test "issue_implement is a catch-all with :default variant and no turn override" do
-      [_, implement] = Stage.defaults()
+      implement = stage_by_id(:issue_implement)
 
       assert implement.role == :implementer
       assert implement.prompt_variant == :default
@@ -62,8 +69,7 @@ defmodule SymphonyElixir.StageTest do
 
   describe "issue_epic_plan predicate (Orchestrator parity)" do
     setup do
-      [epic_plan | _] = Stage.defaults()
-      {:ok, stage: epic_plan}
+      {:ok, stage: stage_by_id(:issue_epic_plan)}
     end
 
     test "matches Todo + has_sub_issues", %{stage: stage} do

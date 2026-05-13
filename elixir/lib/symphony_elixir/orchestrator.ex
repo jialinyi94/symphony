@@ -1136,22 +1136,19 @@ defmodule SymphonyElixir.Orchestrator do
     Application.get_env(:symphony_elixir, :agent_runner_module, AgentRunner)
   end
 
-  defp build_run_opts(%Issue{} = issue, base_opts, state) do
+  defp build_run_opts(%Issue{} = issue, base_opts, %State{} = state) do
     case stage_driven_opts(issue, base_opts, state) do
       {:ok, opts} -> opts
       :legacy -> legacy_build_run_opts(issue, base_opts)
     end
   end
 
-  defp build_run_opts(_issue, base_opts, _state), do: base_opts
-
   # Try to resolve a Stage for this issue's WorkItem and use
-  # `Stage.dispatch_options/2` for opts. Falls back to legacy
-  # epic_classification path when no WorkItem is cached (e.g.
-  # dispatch path called outside a polling cycle, or non-GitHub
-  # tracker with no fetch_work_items impl).
-  defp stage_driven_opts(_issue, _base_opts, nil), do: :legacy
-
+  # `Stage.dispatch_options/2` for opts. Falls back to the legacy
+  # `epic_classification` path when no WorkItem is cached for the
+  # issue (non-GitHub trackers, or a polling cycle that hasn't populated
+  # the cache yet). Caller invariants — `%Issue{}` + `%State{}` — are
+  # encoded in `build_run_opts/3`'s head, so we don't repeat them here.
   defp stage_driven_opts(%Issue{} = issue, base_opts, %State{} = state) do
     case work_item_for(state, issue) do
       %WorkItem{} = wi -> resolve_stage_opts(wi, base_opts)
@@ -1361,7 +1358,6 @@ defmodule SymphonyElixir.Orchestrator do
       {:ok, nil} -> true
       {:ok, %{}} -> false
       {:error, reason} -> plan_error_invalid?(reason)
-      _ -> false
     end
   end
 

@@ -9,7 +9,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   @behaviour SymphonyElixir.Agent
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety, SSH}
+  alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety, Role, SSH}
 
   @initialize_id 1
   @thread_start_id 2
@@ -44,9 +44,10 @@ defmodule SymphonyElixir.Codex.AppServer do
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
+    role = Keyword.get(opts, :role)
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
-         {:ok, port} <- start_port(expanded_workspace, worker_host) do
+         {:ok, port} <- start_port(expanded_workspace, worker_host, role) do
       metadata = port_metadata(port, worker_host)
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
@@ -191,41 +192,93 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_port(workspace, nil) do
+  defp start_port(workspace, nil, role) do
     executable = System.find_executable("bash")
 
     if is_nil(executable) do
       {:error, :bash_not_found}
     else
-      port =
-        Port.open(
-          {:spawn_executable, String.to_charlist(executable)},
-          [
-            :binary,
-            :exit_status,
-            :stderr_to_stdout,
-            args: [~c"-lc", String.to_charlist(Config.settings!().codex.command)],
-            cd: String.to_charlist(workspace),
-            line: @port_line_bytes
-          ]
-        )
+      port = Port.open({:spawn_executable, String.to_charlist(executable)}, local_port_opts(workspace, role))
 
       {:ok, port}
     end
   end
 
-  defp start_port(workspace, worker_host) when is_binary(worker_host) do
-    remote_command = remote_launch_command(workspace)
+  defp start_port(workspace, worker_host, role) when is_binary(worker_host) do
+    remote_command = remote_launch_command(workspace, role)
     SSH.start_port(worker_host, remote_command, line: @port_line_bytes)
   end
 
-  defp remote_launch_command(workspace) when is_binary(workspace) do
+  @doc """
+  Build the Port.open options for the local (no `worker_host`) spawn.
+
+  Public so tests can assert that a configured `Role` reshapes the
+  spawn args and env without actually spawning a process. The shape:
+
+    * `args:` is always `[~c"-lc", <command>]` where `<command>` is
+      `role.command` if set, otherwise the global `codex.command`.
+    * `{:env, [...]}` is appended **only** when the role resolves a
+      non-empty `GITHUB_TOKEN` via `Role.resolve_token/1`. Port's
+      `:env` adds to (does not replace) the inherited env, so the
+      injection shadows any inherited `GITHUB_TOKEN`.
+  """
+  @spec local_port_opts(Path.t(), Role.t() | nil) :: [term()]
+  def local_port_opts(workspace, role) do
     [
-      "cd #{shell_escape(workspace)}",
-      "exec #{Config.settings!().codex.command}"
+      :binary,
+      :exit_status,
+      :stderr_to_stdout,
+      args: [~c"-lc", String.to_charlist(command_for_role(role))],
+      cd: String.to_charlist(workspace),
+      line: @port_line_bytes
     ]
+    |> maybe_inject_env(role)
+  end
+
+  @doc """
+  Build the remote shell command sent to `SSH.start_port/3`.
+
+  Public so tests can assert that a configured `Role` prepends an
+  `export GITHUB_TOKEN=<escaped>` and substitutes the command without
+  actually spawning ssh. Unlike `local_port_opts/2`, env injection
+  here is done **inside the remote shell** because `SSH.start_port`
+  receives a single command string — there is no Port `:env` channel
+  reaching the remote host.
+  """
+  @spec remote_launch_command(Path.t(), Role.t() | nil) :: String.t()
+  def remote_launch_command(workspace, role) when is_binary(workspace) do
+    [
+      remote_env_preamble(role),
+      "cd #{shell_escape(workspace)}",
+      "exec #{command_for_role(role)}"
+    ]
+    |> Enum.reject(&(&1 == ""))
     |> Enum.join(" && ")
   end
+
+  defp command_for_role(%Role{command: command}) when is_binary(command) and command != "", do: command
+  defp command_for_role(_role), do: Config.settings!().codex.command
+
+  defp maybe_inject_env(port_opts, %Role{} = role) do
+    case Role.resolve_token(role) do
+      nil ->
+        port_opts
+
+      token when is_binary(token) ->
+        port_opts ++ [{:env, [{~c"GITHUB_TOKEN", to_charlist(token)}]}]
+    end
+  end
+
+  defp maybe_inject_env(port_opts, _role), do: port_opts
+
+  defp remote_env_preamble(%Role{} = role) do
+    case Role.resolve_token(role) do
+      nil -> ""
+      token when is_binary(token) -> "export GITHUB_TOKEN=#{shell_escape(token)}"
+    end
+  end
+
+  defp remote_env_preamble(_role), do: ""
 
   defp port_metadata(port, worker_host) when is_port(port) do
     base_metadata =

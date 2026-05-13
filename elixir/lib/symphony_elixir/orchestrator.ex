@@ -7,7 +7,18 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, Issue, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{
+    AgentRunner,
+    Config,
+    Issue,
+    Stage,
+    StageResolver,
+    StatusDashboard,
+    Tracker,
+    Workflow,
+    WorkItem,
+    Workspace
+  }
 
   @planner_failure_comment """
   Symphony's epic planner run did not produce a valid `<!-- symphony-plan:v1 -->` block on this issue.
@@ -44,7 +55,12 @@ defmodule SymphonyElixir.Orchestrator do
       claimed: MapSet.new(),
       retry_attempts: %{},
       codex_totals: nil,
-      codex_rate_limits: nil
+      codex_rate_limits: nil,
+      # Cache of the latest WorkItems keyed by issue.id, refreshed once
+      # per polling cycle. Lets `build_run_opts/2` consult
+      # `Stage.dispatch_options/2` without a second tracker fetch and
+      # lets `should_dispatch_issue?/4` skip terminal stages.
+      work_items_by_issue_id: %{}
     ]
   end
 
@@ -231,7 +247,10 @@ defmodule SymphonyElixir.Orchestrator do
     state = reconcile_running_issues(state)
 
     with :ok <- Config.validate!(),
-         {:ok, issues} <- Tracker.fetch_candidate_issues() do
+         {:ok, work_items} <- Tracker.fetch_work_items() do
+      issues = work_items_to_issues(work_items)
+      state = %{state | work_items_by_issue_id: index_work_items(work_items)}
+
       :ok = escalate_failed_planner_runs(issues, state.running)
 
       run_epic_reaper(issues)
@@ -281,6 +300,29 @@ defmodule SymphonyElixir.Orchestrator do
         state
     end
   end
+
+  defp work_items_to_issues(work_items) when is_list(work_items) do
+    work_items
+    |> Enum.map(&work_item_issue/1)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp work_item_issue(%WorkItem{issue: %Issue{} = issue}), do: issue
+  defp work_item_issue(%Issue{} = issue), do: issue
+  defp work_item_issue(_), do: nil
+
+  defp index_work_items(work_items) when is_list(work_items) do
+    Enum.reduce(work_items, %{}, fn
+      %WorkItem{issue: %Issue{id: id}} = wi, acc when is_binary(id) -> Map.put(acc, id, wi)
+      _, acc -> acc
+    end)
+  end
+
+  defp work_item_for(%State{work_items_by_issue_id: by_id}, %Issue{id: id}) when is_binary(id) do
+    Map.get(by_id, id)
+  end
+
+  defp work_item_for(_state, _issue), do: nil
 
   defp reconcile_running_issues(%State{} = state) do
     state = reconcile_stalled_running_issues(state)
@@ -702,7 +744,17 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
     base_opts = [attempt: attempt, worker_host: worker_host]
-    run_opts = build_run_opts(issue, base_opts)
+    run_opts = build_run_opts(issue, base_opts, state)
+
+    if Keyword.get(run_opts, :skip_dispatch, false) do
+      Logger.info("Skipping dispatch for terminal stage: #{issue_context(issue)}")
+      state
+    else
+      do_spawn_issue(state, issue, attempt, recipient, worker_host, run_opts)
+    end
+  end
+
+  defp do_spawn_issue(%State{} = state, issue, attempt, recipient, worker_host, run_opts) do
     runner = agent_runner_module()
 
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
@@ -1084,7 +1136,65 @@ defmodule SymphonyElixir.Orchestrator do
     Application.get_env(:symphony_elixir, :agent_runner_module, AgentRunner)
   end
 
-  defp build_run_opts(%Issue{} = issue, base_opts) do
+  defp build_run_opts(%Issue{} = issue, base_opts, %State{} = state) do
+    case stage_driven_opts(issue, base_opts, state) do
+      {:ok, opts} -> opts
+      :legacy -> legacy_build_run_opts(issue, base_opts)
+    end
+  end
+
+  # Try to resolve a Stage for this issue's WorkItem and use
+  # `Stage.dispatch_options/2` for opts. Falls back to the legacy
+  # `epic_classification` path when no WorkItem is cached for the
+  # issue (non-GitHub trackers, or a polling cycle that hasn't populated
+  # the cache yet). Caller invariants — `%Issue{}` + `%State{}` — are
+  # encoded in `build_run_opts/3`'s head, so we don't repeat them here.
+  defp stage_driven_opts(%Issue{} = issue, base_opts, %State{} = state) do
+    case work_item_for(state, issue) do
+      %WorkItem{} = wi -> resolve_stage_opts(wi, base_opts)
+      _ -> :legacy
+    end
+  end
+
+  defp resolve_stage_opts(%WorkItem{} = wi, base_opts) do
+    case StageResolver.resolve(wi, Stage.defaults()) do
+      {:ok, %Stage{} = stage} ->
+        case Stage.dispatch_options(stage, wi, base_opts) do
+          {:ok, opts} -> guard_prompt_availability(opts, stage, wi, base_opts)
+          {:skip, _terminal_stage} -> {:ok, Keyword.put(base_opts, :skip_dispatch, true)}
+        end
+
+      {:error, :no_matching_stage} ->
+        :legacy
+    end
+  end
+
+  # When a non-terminal stage resolves to a non-`:default` prompt
+  # variant that hasn't been defined in WORKFLOW.md yet, skip
+  # dispatch instead of crashing the agent run on the missing
+  # prompt. This makes "rebuild + restart before updating
+  # WORKFLOW.md" a safe operational sequence: PR-stage detection
+  # still happens (so we can observe progress in logs), but the
+  # orchestrator won't dispatch an agent that would immediately
+  # raise `workflow_missing_prompt` in `PromptBuilder.build_prompt/2`.
+  defp guard_prompt_availability(opts, %Stage{} = stage, %WorkItem{} = wi, base_opts) do
+    variant = Keyword.get(opts, :variant, :default)
+
+    if Workflow.prompt_available?(variant) do
+      {:ok, opts}
+    else
+      Logger.warning(
+        "Skipping dispatch for #{stage_log_context(wi)}: stage=#{inspect(stage.id)} resolves to prompt variant=#{inspect(variant)} but WORKFLOW.md has no prompts.#{variant} entry. Update WORKFLOW.md and rebuild to activate this stage."
+      )
+
+      {:ok, Keyword.put(base_opts, :skip_dispatch, true)}
+    end
+  end
+
+  defp stage_log_context(%WorkItem{issue: %Issue{} = issue}), do: issue_context(issue)
+  defp stage_log_context(%WorkItem{}), do: "issue_id=unknown"
+
+  defp legacy_build_run_opts(%Issue{} = issue, base_opts) do
     case epic_classification(issue) do
       {:epic, sub_numbers} ->
         Keyword.merge(base_opts,
@@ -1097,8 +1207,6 @@ defmodule SymphonyElixir.Orchestrator do
         base_opts
     end
   end
-
-  defp build_run_opts(_issue, base_opts), do: base_opts
 
   defp epic_classification(%Issue{id: id, state: state})
        when is_binary(id) and is_binary(state) do
@@ -1250,7 +1358,6 @@ defmodule SymphonyElixir.Orchestrator do
       {:ok, nil} -> true
       {:ok, %{}} -> false
       {:error, reason} -> plan_error_invalid?(reason)
-      _ -> false
     end
   end
 

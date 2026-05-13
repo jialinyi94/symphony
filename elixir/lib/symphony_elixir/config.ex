@@ -4,6 +4,7 @@ defmodule SymphonyElixir.Config do
   """
 
   alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.Role
   alias SymphonyElixir.Workflow
 
   @default_prompt_template """
@@ -72,6 +73,55 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  @doc """
+  Resolve a Role by id, falling back to a sensible default when not
+  configured in `WORKFLOW.md`'s `roles:` block.
+
+  Defaults (when role id is not configured):
+
+    * `"implementer"` — uses the top-level `agent.kind` + the matching
+      `claude_code.command` / `codex.command` (i.e. the pre-roles
+      behavior). No identity injection.
+    * `"reviewer"`    — `agent_kind: "codex"`, command + token env unset.
+      A reviewer role needs explicit configuration to actually run a
+      separate identity; an unconfigured reviewer falls through to the
+      parent's auth context (same as implementer at the runtime layer).
+    * other ids       — generic `agent_kind: "claude_code"` defaults.
+  """
+  @spec role(String.t() | atom()) :: Role.t()
+  def role(role_id) when is_atom(role_id), do: role(Atom.to_string(role_id))
+
+  def role(role_id) when is_binary(role_id) do
+    case Map.get(settings!().roles || %{}, role_id) do
+      nil -> default_role(role_id)
+      raw -> Role.from_config(role_id, raw)
+    end
+  end
+
+  # `command: nil` is intentional — it means "no override, let the
+  # runner pick its own default." Previously this populated
+  # `claude_code.command` regardless of `agent.kind`, which silently
+  # ran the wrong binary when `agent.kind: "codex"` (claude.command
+  # was injected as a codex command). Both `ClaudeCode.Runner` and
+  # `Codex.AppServer` already fall back to their respective
+  # `settings.<runner>.command` when role.command is nil, so the
+  # global config still drives implementer behavior end-to-end.
+  defp default_role("implementer") do
+    %Role{
+      id: "implementer",
+      agent_kind: settings!().agent.kind || "claude_code",
+      command: nil
+    }
+  end
+
+  defp default_role("reviewer") do
+    %Role{id: "reviewer", agent_kind: "codex"}
+  end
+
+  defp default_role(other) do
+    %Role{id: other}
+  end
+
   @spec workflow_prompt() :: String.t()
   def workflow_prompt do
     case Workflow.current() do
@@ -115,15 +165,13 @@ defmodule SymphonyElixir.Config do
   end
 
   defp validate_semantics(settings) do
-    cond do
-      is_nil(settings.tracker.kind) ->
-        {:error, :missing_tracker_kind}
-
-      true ->
-        case SymphonyElixir.Tracker.adapter_for_kind(settings.tracker.kind) do
-          {:ok, adapter} -> adapter.validate_config(settings.tracker)
-          {:error, _} = err -> err
-        end
+    if is_nil(settings.tracker.kind) do
+      {:error, :missing_tracker_kind}
+    else
+      case SymphonyElixir.Tracker.adapter_for_kind(settings.tracker.kind) do
+        {:ok, adapter} -> adapter.validate_config(settings.tracker)
+        {:error, _} = err -> err
+      end
     end
   end
 

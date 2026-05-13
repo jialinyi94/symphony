@@ -4,7 +4,7 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
-  alias SymphonyElixir.{Agent, Config, Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Agent, Config, Issue, PromptBuilder, Role, Tracker, Workspace}
 
   @type worker_host :: String.t() | nil
 
@@ -78,13 +78,34 @@ defmodule SymphonyElixir.AgentRunner do
   defp run_agent_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+    role = resolve_role(opts)
+    session_opts = [worker_host: worker_host, role: role]
 
-    with {:ok, session} <- Agent.start_session(workspace, worker_host: worker_host) do
+    with {:ok, session} <- Agent.start_session(workspace, session_opts) do
       try do
         do_run_agent_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
       after
         Agent.stop_session(session)
       end
+    end
+  end
+
+  # Resolve a Role from opts. Accepts:
+  #   * `opts[:role] = %Role{}` — explicit struct (preferred)
+  #   * `opts[:role] = "reviewer"` / `:reviewer` — id, resolved via Config
+  #   * absent or nil — defaults to `Config.role("implementer")` for BC
+  #
+  # The `nil -> implementer` clause MUST come before the atom clause
+  # because `is_atom(nil)` is true — without this `Config.role(nil)`
+  # would be called and return a generic default Role with
+  # `agent_kind: "claude_code"`, accidentally bypassing the configured
+  # global agent.kind.
+  defp resolve_role(opts) do
+    case Keyword.get(opts, :role) do
+      %Role{} = role -> role
+      nil -> Config.role("implementer")
+      id when is_binary(id) -> Config.role(id)
+      id when is_atom(id) -> Config.role(id)
     end
   end
 

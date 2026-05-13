@@ -343,16 +343,20 @@ defmodule SymphonyElixir.GitHub.Adapter do
       when is_binary(issue_id) and is_binary(state_name) do
     settings = Config.settings!().tracker
 
-    with {:ok, [issue]} <- client_module().fetch_issue_states_by_ids([issue_id]) do
-      target_label = StateMapping.state_to_label(state_name)
-      ops = StateMapping.label_ops_for_state(state_name, issue.labels)
-      next_labels = apply_label_ops(issue.labels, ops, target_label)
-      next_state = github_state_for(state_name, settings.terminal_states)
+    case client_module().fetch_issue_states_by_ids([issue_id]) do
+      {:ok, [issue]} ->
+        target_label = StateMapping.state_to_label(state_name)
+        ops = StateMapping.label_ops_for_state(state_name, issue.labels)
+        next_labels = apply_label_ops(issue.labels, ops, target_label)
+        next_state = github_state_for(state_name, settings.terminal_states)
 
-      client_module().set_labels_and_state(issue_id, next_labels, next_state)
-    else
-      {:ok, []} -> {:error, :issue_not_found}
-      {:error, reason} -> {:error, reason}
+        client_module().set_labels_and_state(issue_id, next_labels, next_state)
+
+      {:ok, []} ->
+        {:error, :issue_not_found}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

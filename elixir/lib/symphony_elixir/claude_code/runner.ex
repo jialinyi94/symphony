@@ -29,7 +29,7 @@ defmodule SymphonyElixir.ClaudeCode.Runner do
   @behaviour SymphonyElixir.Agent
 
   require Logger
-  alias SymphonyElixir.{Config, PathSafety}
+  alias SymphonyElixir.{Config, PathSafety, Role}
 
   import Bitwise
 
@@ -46,7 +46,8 @@ defmodule SymphonyElixir.ClaudeCode.Runner do
         session = %{
           session_id: generate_session_id(),
           workspace: expanded,
-          worker_host: nil
+          worker_host: nil,
+          role: Keyword.get(opts, :role)
         }
 
         {:ok, session}
@@ -55,12 +56,14 @@ defmodule SymphonyElixir.ClaudeCode.Runner do
   end
 
   @impl true
-  def run_turn(%{session_id: session_id, workspace: workspace}, prompt, issue, opts \\ []) do
+  @spec run_turn(map(), String.t(), struct(), keyword()) :: {:ok, map()} | {:error, term()}
+  def run_turn(%{session_id: session_id, workspace: workspace} = session, prompt, issue, opts) do
     on_message = Keyword.get(opts, :on_message, fn _ -> :ok end)
-    settings = claude_code_settings()
+    role = role_for_turn(session, opts)
+    settings = claude_code_settings(role)
     claude_args = build_args(session_id, settings) ++ [prompt]
 
-    Logger.info("Claude Code turn starting for #{issue_context(issue)} session_id=#{session_id} workspace=#{workspace} prompt_bytes=#{byte_size(prompt)}")
+    Logger.info("Claude Code turn starting for #{issue_context(issue)} session_id=#{session_id} workspace=#{workspace} role=#{role_for_log(role)} prompt_bytes=#{byte_size(prompt)}")
 
     sh = System.find_executable("sh") || raise ArgumentError, "sh not found on PATH"
     claude_bin = locate_binary!(settings.command)
@@ -68,19 +71,19 @@ defmodule SymphonyElixir.ClaudeCode.Runner do
     # immediately and skips its 3s "no stdin data received" wait.
     sh_args = ["-c", "exec \"$@\" </dev/null", "--", claude_bin] ++ claude_args
 
-    port =
-      Port.open(
-        {:spawn_executable, sh},
-        [
-          :binary,
-          :exit_status,
-          :use_stdio,
-          :stderr_to_stdout,
-          {:line, @port_line_bytes},
-          {:cd, workspace},
-          {:args, sh_args}
-        ]
-      )
+    port_opts =
+      [
+        :binary,
+        :exit_status,
+        :use_stdio,
+        :stderr_to_stdout,
+        {:line, @port_line_bytes},
+        {:cd, workspace},
+        {:args, sh_args}
+      ]
+      |> maybe_inject_env(role)
+
+    port = Port.open({:spawn_executable, sh}, port_opts)
 
     case stream_loop(port, on_message, []) do
       {:ok, _events} ->
@@ -162,22 +165,61 @@ defmodule SymphonyElixir.ClaudeCode.Runner do
   defp emit(on_message, event) when is_function(on_message, 1), do: on_message.(event)
   defp emit(_on_message, _event), do: :ok
 
-  defp claude_code_settings do
+  defp claude_code_settings(role) do
     settings = Config.settings!()
+    base = claude_code_base_settings(Map.get(settings, :claude_code))
+    apply_role_overrides(base, role)
+  end
 
-    case Map.get(settings, :claude_code) do
-      nil ->
-        %{command: "claude", model: nil, permission_mode: nil, allowed_tools: nil}
+  defp claude_code_base_settings(nil),
+    do: %{command: "claude", model: nil, permission_mode: nil, allowed_tools: nil}
 
-      claude_code ->
-        %{
-          command: Map.get(claude_code, :command) || "claude",
-          model: Map.get(claude_code, :model),
-          permission_mode: Map.get(claude_code, :permission_mode),
-          allowed_tools: Map.get(claude_code, :allowed_tools)
-        }
+  defp claude_code_base_settings(claude_code) do
+    %{
+      command: Map.get(claude_code, :command) || "claude",
+      model: Map.get(claude_code, :model),
+      permission_mode: Map.get(claude_code, :permission_mode),
+      allowed_tools: Map.get(claude_code, :allowed_tools)
+    }
+  end
+
+  defp apply_role_overrides(base, %Role{command: command}) when is_binary(command) and command != "",
+    do: %{base | command: command}
+
+  defp apply_role_overrides(base, _role), do: base
+
+  defp role_for_turn(session, opts) do
+    case Keyword.get(opts, :role) do
+      %Role{} = role -> role
+      _ -> Map.get(session, :role)
     end
   end
+
+  defp role_for_log(%Role{id: id}) when is_binary(id), do: id
+  defp role_for_log(_), do: "implementer"
+
+  # Inject `GITHUB_TOKEN=<role-token>` into the spawned child env when
+  # the role declares a `github_token_env` AND that env var is set on
+  # the parent process. Falls through to inheriting the parent env
+  # unchanged when there's no override — keeps pre-roles behavior
+  # intact for implementer.
+  # `Port.open` options are a mixed list of bare atoms (`:binary`,
+  # `:exit_status`) and tuples (`{:cd, ...}`, `{:args, ...}`) — NOT a
+  # Keyword. We just append `{:env, [...]}` as a tuple option. Port's
+  # `:env` adds to the child env (does not replace it), so the
+  # injected `GITHUB_TOKEN` shadows any inherited value.
+  defp maybe_inject_env(port_opts, %Role{} = role) do
+    case Role.resolve_token(role) do
+      nil ->
+        port_opts
+
+      token when is_binary(token) ->
+        env_entry = {~c"GITHUB_TOKEN", to_charlist(token)}
+        port_opts ++ [{:env, [env_entry]}]
+    end
+  end
+
+  defp maybe_inject_env(port_opts, _role), do: port_opts
 
   @doc """
   Resolves a `claude_code.command` value to an executable path.

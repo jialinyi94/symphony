@@ -11,8 +11,8 @@ defmodule SymphonyElixir.TestSupport do
       alias SymphonyElixir.Codex.AppServer
       alias SymphonyElixir.Config
       alias SymphonyElixir.HttpServer
-      alias SymphonyElixir.Linear.Client
       alias SymphonyElixir.Issue
+      alias SymphonyElixir.Linear.Client
       alias SymphonyElixir.Orchestrator
       alias SymphonyElixir.PromptBuilder
       alias SymphonyElixir.StatusDashboard
@@ -125,7 +125,21 @@ defmodule SymphonyElixir.TestSupport do
           observability_render_interval_ms: 16,
           server_port: nil,
           server_host: nil,
-          prompt: @workflow_prompt
+          prompt: @workflow_prompt,
+          # Default named prompts mirror what production WORKFLOW.md is
+          # expected to define. The orchestrator now refuses to dispatch
+          # any non-`:default` stage variant whose prompt is missing
+          # (see `Workflow.prompt_available?/1`), so tests that exercise
+          # the epic-planner or PR-loop stages need these declared up
+          # front. Override `:prompts` to scope a test down to bare
+          # `:default` (e.g. to assert the guard's skip path).
+          prompts: %{
+            "epic_planner" => "Epic planner prompt.",
+            "pr_first_review" => "Reviewer first-pass prompt.",
+            "pr_author_followup" => "Author follow-up prompt.",
+            "pr_revalidate" => "Reviewer revalidate prompt.",
+            "pr_record_proof" => "Implementer proof-recording prompt."
+          }
         ],
         overrides
       )
@@ -164,6 +178,7 @@ defmodule SymphonyElixir.TestSupport do
     server_port = Keyword.get(config, :server_port)
     server_host = Keyword.get(config, :server_host)
     prompt = Keyword.get(config, :prompt)
+    prompts = Keyword.get(config, :prompts) || %{}
 
     sections =
       [
@@ -198,6 +213,7 @@ defmodule SymphonyElixir.TestSupport do
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),
+        prompts_yaml(prompts),
         "---",
         prompt
       ]
@@ -289,5 +305,24 @@ defmodule SymphonyElixir.TestSupport do
       |> Enum.map_join("\n", &("    " <> &1))
 
     "  #{name}: |\n#{indented}"
+  end
+
+  defp prompts_yaml(map) when is_map(map) and map_size(map) == 0, do: nil
+
+  defp prompts_yaml(map) when is_map(map) do
+    entries =
+      map
+      |> Enum.map(fn {key, value} -> {to_string(key), to_string(value)} end)
+      |> Enum.sort_by(&elem(&1, 0))
+      |> Enum.map_join("\n", fn {key, value} ->
+        body =
+          value
+          |> String.split("\n")
+          |> Enum.map_join("\n", &("    " <> &1))
+
+        "  #{key}: |\n#{body}"
+      end)
+
+    "prompts:\n" <> entries
   end
 end

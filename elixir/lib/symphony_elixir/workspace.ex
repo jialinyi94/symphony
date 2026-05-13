@@ -260,39 +260,39 @@ defmodule SymphonyElixir.Workspace do
 
       command ->
         with {:ok, rendered} <- render_hook_command(command, issue_context, "before_remove") do
-          # `[ -d "$workspace" ]` is a remote-only safety check — we can't
-          # File.dir?/1 a path on the worker before connecting. We render
-          # the hook body *before* embedding it in the SSH script so remote
-          # `before_remove` gets the same `{{ issue.id }}` /
-          # `{{ issue.identifier }}` substitution as every other hook path.
-          script =
-            [
-              remote_shell_assign("workspace", workspace),
-              "if [ -d \"$workspace\" ]; then",
-              "  cd \"$workspace\"",
-              "  #{rendered}",
-              "fi"
-            ]
-            |> Enum.join("\n")
-
-          run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms)
-          |> case do
-            {:ok, {output, status}} ->
-              handle_hook_command_result(
-                {output, status},
-                workspace,
-                issue_context,
-                "before_remove"
-              )
-
-            {:error, {:workspace_hook_timeout, "before_remove", _timeout_ms} = reason} ->
-              {:error, reason}
-
-            {:error, reason} ->
-              {:error, reason}
-          end
+          run_remote_before_remove(rendered, workspace, worker_host, issue_context)
         end
         |> ignore_hook_failure()
+    end
+  end
+
+  # `[ -d "$workspace" ]` is a remote-only safety check — we can't
+  # File.dir?/1 a path on the worker before connecting. We render the
+  # hook body *before* embedding it in the SSH script so remote
+  # `before_remove` gets the same `{{ issue.id }}` /
+  # `{{ issue.identifier }}` substitution as every other hook path.
+  defp run_remote_before_remove(rendered, workspace, worker_host, issue_context) do
+    script =
+      Enum.join(
+        [
+          remote_shell_assign("workspace", workspace),
+          "if [ -d \"$workspace\" ]; then",
+          "  cd \"$workspace\"",
+          "  #{rendered}",
+          "fi"
+        ],
+        "\n"
+      )
+
+    case run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms) do
+      {:ok, {output, status}} ->
+        handle_hook_command_result({output, status}, workspace, issue_context, "before_remove")
+
+      {:error, {:workspace_hook_timeout, "before_remove", _timeout_ms} = reason} ->
+        {:error, reason}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

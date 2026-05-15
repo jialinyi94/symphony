@@ -9,6 +9,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   alias SymphonyElixir.{
     AgentRunner,
+    AgentRunner.PermanentError,
     Config,
     Issue,
     Stage,
@@ -166,16 +167,28 @@ defmodule SymphonyElixir.Orchestrator do
               })
 
             _ ->
-              Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
+              case classify_agent_exit(reason) do
+                :permanent ->
+                  Logger.error("Agent task PERMANENT failure for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; escalating to symphony:human-review (no retry)")
 
-              next_attempt = next_retry_attempt_from_running(running_entry)
+                  escalate_permanent_failure_to_human_review(issue_id, running_entry.identifier, reason)
 
-              schedule_issue_retry(state, issue_id, next_attempt, %{
-                identifier: running_entry.identifier,
-                error: "agent exited: #{inspect(reason)}",
-                worker_host: Map.get(running_entry, :worker_host),
-                workspace_path: Map.get(running_entry, :workspace_path)
-              })
+                  state
+                  |> complete_issue(issue_id)
+                  |> release_issue_claim(issue_id)
+
+                :transient ->
+                  Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
+
+                  next_attempt = next_retry_attempt_from_running(running_entry)
+
+                  schedule_issue_retry(state, issue_id, next_attempt, %{
+                    identifier: running_entry.identifier,
+                    error: "agent exited: #{inspect(reason)}",
+                    worker_host: Map.get(running_entry, :worker_host),
+                    workspace_path: Map.get(running_entry, :workspace_path)
+                  })
+              end
           end
 
         Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
@@ -1263,6 +1276,46 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.error("Failed to update state on #{issue.id} during escalation: #{inspect(reason)}")
+    end
+  end
+
+  # Reason returned to the :DOWN handler is the exit reason of the
+  # Task that ran AgentRunner.run/3. AgentRunner raises
+  # %PermanentError{} for unrecoverable failures (binary missing,
+  # exit 126/127), which the Task supervisor surfaces as
+  # `{%PermanentError{}, stacktrace}`. Anything else is treated as
+  # transient (network blip, model timeout, hook flake) and goes
+  # through the backoff path.
+  defp classify_agent_exit(reason) do
+    if PermanentError.from_exit?(reason), do: :permanent, else: :transient
+  end
+
+  defp escalate_permanent_failure_to_human_review(issue_id, identifier, reason) do
+    body = """
+    Symphony orchestrator stopped retrying this issue after a permanent agent failure:
+
+        #{inspect(reason)}
+
+    Backoff retries cannot recover from this class of error. A human needs to
+    fix the configuration (most commonly: an agent binary missing from the
+    daemon's PATH — check `claude_code.command` / `codex.command` in the
+    workflow file, then restart the orchestrator).
+    """
+
+    case Tracker.create_comment(issue_id, body) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to post permanent-failure escalation comment on issue_id=#{issue_id} (#{identifier}): #{inspect(reason)}")
+    end
+
+    case Tracker.update_issue_state(issue_id, "Human Review") do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("Failed to update state on issue_id=#{issue_id} (#{identifier}) to Human Review: #{inspect(reason)}")
     end
   end
 

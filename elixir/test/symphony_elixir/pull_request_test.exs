@@ -26,6 +26,27 @@ defmodule SymphonyElixir.PullRequestTest do
     }
   end
 
+  describe "normalize_login/1" do
+    test "strips trailing [bot] suffix" do
+      assert PullRequest.normalize_login("reviewer-is-all-u-need[bot]") == "reviewer-is-all-u-need"
+      assert PullRequest.normalize_login("dependabot[bot]") == "dependabot"
+    end
+
+    test "leaves human logins unchanged" do
+      assert PullRequest.normalize_login("alice") == "alice"
+      assert PullRequest.normalize_login("Alice-Smith") == "Alice-Smith"
+    end
+
+    test "passes nil through" do
+      assert PullRequest.normalize_login(nil) == nil
+    end
+
+    test "does not strip [bot] when it is not a suffix" do
+      # Spurious occurrence in the middle of the string is preserved.
+      assert PullRequest.normalize_login("not[bot]a-suffix-here") == "not[bot]a-suffix-here"
+    end
+  end
+
   describe "Review.normalize_state/1" do
     test "maps known states to atoms" do
       assert Review.normalize_state("APPROVED") == :approved

@@ -19,7 +19,14 @@ defmodule SymphonyElixir.PromptBuilder do
     context = %{
       "attempt" => Keyword.get(opts, :attempt),
       "issue" => issue |> Map.from_struct() |> to_solid_map(),
-      "epic" => to_solid_value(Keyword.get(opts, :epic, %{}))
+      "epic" => to_solid_value(Keyword.get(opts, :epic, %{})),
+      # PR-stage prompts reference `{{ pr.number }}`, `{{ pr.head_sha }}`,
+      # etc. `Stage.dispatch_options/3` injects `:pr` from
+      # `WorkItem.pull_request/1` for any stage whose WorkItem carries
+      # an attached PR; non-PR stages get an empty map (so accidental
+      # `{{ pr.foo }}` references still raise strict_variables errors
+      # rather than silently rendering blank).
+      "pr" => to_solid_value(Keyword.get(opts, :pr, %{}))
     }
 
     template

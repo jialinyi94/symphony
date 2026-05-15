@@ -19,26 +19,39 @@ defmodule SymphonyElixir.Codex.AppServerRoleTest do
   @reviewer_token_env "SYMP_TEST_REVIEWER_TOKEN"
   @reviewer_token_value "tkn-reviewer-fixture"
 
+  # Codex.AppServer now runs the configured command through
+  # `Agent.BinaryResolver.resolve!/2` so the spawned binary path is
+  # absolute (decouples agent dispatch from systemd's stripped PATH).
+  # Tests must therefore use a binary that is guaranteed to exist on
+  # PATH across dev/CI environments — /bin/echo qualifies on Linux
+  # and macOS and is the conventional placeholder elsewhere in this
+  # repo's test suite.
+  @codex_binary "/bin/echo"
+  @global_codex_command @codex_binary <> " app-server"
+  @role_codex_command @codex_binary <> " exec --skill gh-review-bot"
+
   setup do
     previous = System.get_env(@reviewer_token_env)
+    workflow_path = Application.get_env(:symphony_elixir, :workflow_file_path)
+    write_workflow_file!(workflow_path, codex_command: @global_codex_command)
     on_exit(fn -> restore_env(@reviewer_token_env, previous) end)
     :ok
   end
 
   describe "local_port_opts/2" do
-    test "without a role: uses configured codex.command, no :env injection" do
+    test "without a role: uses configured codex.command (binary resolved to absolute path), no :env injection" do
       opts = AppServer.local_port_opts("/some/workspace", nil)
 
-      assert opts_args(opts) == [~c"-lc", ~c"codex app-server"]
+      assert opts_args(opts) == [~c"-lc", String.to_charlist(@global_codex_command)]
       refute Keyword.has_key?(opts, :env)
     end
 
-    test "role with :command: overrides codex.command in args" do
-      role = %Role{id: "reviewer", agent_kind: "codex", command: "codex exec --skill gh-review-bot"}
+    test "role with :command: overrides codex.command in args (binary resolved)" do
+      role = %Role{id: "reviewer", agent_kind: "codex", command: @role_codex_command}
 
       opts = AppServer.local_port_opts("/some/workspace", role)
 
-      assert opts_args(opts) == [~c"-lc", ~c"codex exec --skill gh-review-bot"]
+      assert opts_args(opts) == [~c"-lc", String.to_charlist(@role_codex_command)]
     end
 
     test "role with :github_token_env set + parent env populated: injects GITHUB_TOKEN" do
@@ -74,32 +87,41 @@ defmodule SymphonyElixir.Codex.AppServerRoleTest do
       role = %Role{
         id: "reviewer",
         agent_kind: "codex",
-        command: "codex exec --skill gh-review-bot",
+        command: @role_codex_command,
         github_token_env: @reviewer_token_env
       }
 
       opts = AppServer.local_port_opts("/some/workspace", role)
 
-      assert opts_args(opts) == [~c"-lc", ~c"codex exec --skill gh-review-bot"]
+      assert opts_args(opts) == [~c"-lc", String.to_charlist(@role_codex_command)]
       assert Keyword.get(opts, :env) == [{~c"GITHUB_TOKEN", to_charlist(@reviewer_token_value)}]
+    end
+
+    test "missing codex binary in command raises ArgumentError at dispatch time" do
+      workflow_path = Application.get_env(:symphony_elixir, :workflow_file_path)
+      write_workflow_file!(workflow_path, codex_command: "definitely-not-a-codex-xyzzy app-server")
+
+      assert_raise ArgumentError, ~r/codex binary .* not found on PATH/, fn ->
+        AppServer.local_port_opts("/some/workspace", nil)
+      end
     end
   end
 
   describe "remote_launch_command/2" do
-    test "without a role: emits cd + exec only" do
+    test "without a role: emits cd + exec only (command shipped verbatim — remote PATH is authoritative)" do
       command = AppServer.remote_launch_command("/remote/workspaces/MT-1", nil)
 
-      assert command == "cd '/remote/workspaces/MT-1' && exec codex app-server"
+      assert command == "cd '/remote/workspaces/MT-1' && exec #{@global_codex_command}"
       refute command =~ "export GITHUB_TOKEN"
     end
 
-    test "role.command: substituted in exec clause" do
-      role = %Role{id: "reviewer", agent_kind: "codex", command: "codex exec --skill gh-review-bot"}
+    test "role.command: substituted in exec clause (command shipped verbatim)" do
+      role = %Role{id: "reviewer", agent_kind: "codex", command: @role_codex_command}
 
       command = AppServer.remote_launch_command("/remote/workspaces/MT-1", role)
 
-      assert command =~ "exec codex exec --skill gh-review-bot"
-      refute command =~ "exec codex app-server"
+      assert command =~ "exec #{@role_codex_command}"
+      refute command =~ "exec #{@global_codex_command}"
     end
 
     test "role + token in env: prepends export GITHUB_TOKEN with shell-escaped value" do
@@ -128,7 +150,7 @@ defmodule SymphonyElixir.Codex.AppServerRoleTest do
       command = AppServer.remote_launch_command("/remote/workspaces/MT-1", role)
 
       refute command =~ "export GITHUB_TOKEN"
-      assert command == "cd '/remote/workspaces/MT-1' && exec codex app-server"
+      assert command == "cd '/remote/workspaces/MT-1' && exec #{@global_codex_command}"
     end
   end
 

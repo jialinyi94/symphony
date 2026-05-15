@@ -46,6 +46,29 @@ defmodule SymphonyElixir.PullRequest do
 
   alias SymphonyElixir.PullRequest.Review
 
+  @doc """
+  Strip GitHub's `[bot]` suffix from a user login.
+
+  GitHub's REST API returns bot account `user.login` values with a literal
+  `[bot]` suffix (e.g. `"reviewer-is-all-u-need[bot]"`). The `user.type`
+  field separately indicates the account kind, so the suffix is purely a
+  display convention — but downstream code that compares logins (stage
+  predicates looking up `latest_reviews_by_author`, reviewer-identity
+  matching) gets caught when one side carries the suffix and the other
+  doesn't.
+
+  We normalize at the adapter boundary (GitHub client → `Review`/`PullRequest`
+  struct) so every layer above sees a single canonical form. Passing in
+  `nil` or a string without the suffix is safe — both pass through
+  unchanged.
+  """
+  @spec normalize_login(String.t() | nil) :: String.t() | nil
+  def normalize_login(nil), do: nil
+
+  def normalize_login(login) when is_binary(login) do
+    String.replace_suffix(login, "[bot]", "")
+  end
+
   defstruct [
     :number,
     :head_sha,

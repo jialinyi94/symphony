@@ -224,26 +224,15 @@ defmodule SymphonyElixir.ClaudeCode.Runner do
   @doc """
   Resolves a `claude_code.command` value to an executable path.
 
-  Three input shapes are supported, in order of priority:
-
-    * absolute paths (`"/usr/bin/claude"`) — returned verbatim.
-    * tilde-prefixed paths (`"~/.local/bin/claude"`) — `Path.expand/1`'d so
-      WORKFLOW.md authors can target a per-user install without baking the
-      runtime PATH of the operator (e.g. systemd-managed Symphony processes
-      whose service environment doesn't include `~/.local/bin`).
-    * bare names (`"claude"`) — looked up via `System.find_executable/1`.
+  Delegates to `SymphonyElixir.Agent.BinaryResolver`, the shared helper
+  also used by `Codex.AppServer`, so both agent kinds expand `~/...`
+  paths and PATH-resolve bare names identically.
 
   Public so it can be exercised from tests without spawning a real port.
   """
   @spec locate_binary!(String.t()) :: String.t()
-  def locate_binary!("/" <> _ = path), do: path
-  def locate_binary!("~" <> _ = path), do: Path.expand(path)
-
-  def locate_binary!(name) do
-    case System.find_executable(name) do
-      nil -> raise ArgumentError, "claude binary #{inspect(name)} not found on PATH"
-      path -> path
-    end
+  def locate_binary!(command) do
+    SymphonyElixir.Agent.BinaryResolver.resolve!(command, label: "claude")
   end
 
   defp generate_session_id do

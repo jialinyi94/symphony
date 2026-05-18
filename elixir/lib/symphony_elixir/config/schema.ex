@@ -161,9 +161,14 @@ defmodule SymphonyElixir.Config.Schema do
     embedded_schema do
       field(:command, :string, default: "codex app-server")
 
+      # Codex 0.130 renamed this AskForApproval variant from `reject` to
+      # `granular`. The three boolean fields (sandbox_approval / rules /
+      # mcp_elicitations) are unchanged — semantics ("refuse all elevation
+      # requests") preserved. See codex_app_server_protocol.v2 schema,
+      # GranularAskForApproval definition.
       field(:approval_policy, StringOrMap,
         default: %{
-          "reject" => %{
+          "granular" => %{
             "sandbox_approval" => true,
             "rules" => true,
             "mcp_elicitations" => true

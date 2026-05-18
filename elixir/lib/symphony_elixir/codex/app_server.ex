@@ -9,7 +9,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   @behaviour SymphonyElixir.Agent
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety, Role, SSH}
+  alias SymphonyElixir.{Agent.BinaryResolver, Codex.DynamicTool, Config, PathSafety, Role, SSH}
 
   @initialize_id 1
   @thread_start_id 2
@@ -228,7 +228,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       :binary,
       :exit_status,
       :stderr_to_stdout,
-      args: [~c"-lc", String.to_charlist(command_for_role(role))],
+      args: [~c"-lc", String.to_charlist(resolve_command(command_for_role(role)))],
       cd: String.to_charlist(workspace),
       line: @port_line_bytes
     ]
@@ -258,6 +258,27 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp command_for_role(%Role{command: command}) when is_binary(command) and command != "", do: command
   defp command_for_role(_role), do: Config.settings!().codex.command
+
+  # Resolve the binary part of a shell-ready command string against the
+  # *local* PATH (and `~` expansion). Applied only to the local-spawn
+  # path (`local_port_opts/2`) — `remote_launch_command/2` is shipped
+  # verbatim to the remote host whose PATH is independent of ours.
+  #
+  # The first whitespace-separated token is the binary; the rest are
+  # args passed verbatim to the shell. Resolving only the binary keeps
+  # the eventual `bash -lc "<command>"` invocation independent of the
+  # daemon's PATH, which under `systemd --user` typically lacks
+  # ~/.local/bin and /home/linuxbrew/.linuxbrew/bin.
+  defp resolve_command(command) when is_binary(command) do
+    {bin, rest} =
+      case String.split(command, " ", parts: 2) do
+        [bin] -> {bin, ""}
+        [bin, rest] -> {bin, rest}
+      end
+
+    resolved = BinaryResolver.resolve!(bin, label: "codex")
+    if rest == "", do: resolved, else: resolved <> " " <> rest
+  end
 
   defp maybe_inject_env(port_opts, %Role{} = role) do
     case Role.resolve_token(role) do

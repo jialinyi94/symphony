@@ -4,7 +4,7 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
-  alias SymphonyElixir.{Agent, Config, Issue, PromptBuilder, Role, Tracker, Workspace}
+  alias SymphonyElixir.{Agent, AgentRunner.PermanentError, Config, Issue, PromptBuilder, Role, Tracker, Workspace}
 
   @type worker_host :: String.t() | nil
 
@@ -15,14 +15,41 @@ defmodule SymphonyElixir.AgentRunner do
 
     Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
-    case run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
-      :ok ->
-        :ok
+    try do
+      case run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
+        :ok ->
+          :ok
 
-      {:error, reason} ->
-        Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
-        raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
+        {:error, reason} ->
+          Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
+          raise classify_error(reason, issue)
+      end
+    rescue
+      e in ArgumentError ->
+        # Pre-spawn configuration failure (e.g. Agent.BinaryResolver
+        # could not locate the agent binary on PATH). Surface as a
+        # PermanentError so the orchestrator can escalate to human
+        # review instead of looping through schedule_issue_retry.
+        message = "Agent run failed for #{issue_context(issue)} (permanent: #{Exception.message(e)})"
+        Logger.error(message)
+        reraise PermanentError.exception(message: message, reason: e), __STACKTRACE__
     end
+  end
+
+  # Classify a tuple returned by `run_on_worker_host/4` into either a
+  # PermanentError (retry won't help — escalate) or a plain
+  # RuntimeError (transient — schedule_issue_retry as before).
+  #
+  # Exit codes 126/127 mean "command found-but-not-executable" /
+  # "command not found" respectively. Both indicate a misconfigured
+  # binary path that no amount of backoff can heal.
+  defp classify_error({:port_exit, code} = reason, issue) when code in [126, 127] do
+    message = "Agent run failed for #{issue_context(issue)} (permanent: shell exit #{code} — binary not found / not executable)"
+    PermanentError.exception(message: message, reason: reason)
+  end
+
+  defp classify_error(reason, issue) do
+    RuntimeError.exception("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
   end
 
   defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do

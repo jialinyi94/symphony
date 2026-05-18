@@ -248,7 +248,7 @@ defmodule SymphonyElixir.GitHub.Client do
       url: raw["html_url"],
       title: raw["title"],
       body: raw["body"],
-      author_login: get_in(raw, ["user", "login"]),
+      author_login: PullRequest.normalize_login(get_in(raw, ["user", "login"])),
       linked_issue_number: extract_linked_issue_number(raw["body"]),
       latest_reviews_by_author: %{},
       reviews: [],
@@ -265,7 +265,7 @@ defmodule SymphonyElixir.GitHub.Client do
 
   defp normalize_review(raw) when is_map(raw) do
     %PullRequest.Review{
-      author_login: get_in(raw, ["user", "login"]),
+      author_login: PullRequest.normalize_login(get_in(raw, ["user", "login"])),
       state: PullRequest.Review.normalize_state(raw["state"]),
       commit_id: raw["commit_id"],
       submitted_at: parse_datetime(raw["submitted_at"]),

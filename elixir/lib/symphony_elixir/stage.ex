@@ -44,10 +44,19 @@ defmodule SymphonyElixir.Stage do
 
   Override via application env (`:symphony_elixir, :reviewer_login`) or
   fall back to the WORKFLOW-typical default.
+
+  The returned value is run through `PullRequest.normalize_login/1` so an
+  operator who configures the literal GitHub bot login (e.g.
+  `"reviewer-is-all-u-need[bot]"`) still matches the keys in
+  `latest_reviews_by_author`, which the GitHub adapter normalizes on the
+  way in. Without this, configured `[bot]` suffixes silently break the
+  PR predicates.
   """
   @spec reviewer_login() :: String.t()
   def reviewer_login do
-    Application.get_env(:symphony_elixir, :reviewer_login, "reviewer-is-all-u-need")
+    :symphony_elixir
+    |> Application.get_env(:reviewer_login, "reviewer-is-all-u-need")
+    |> PullRequest.normalize_login()
   end
 
   defstruct [
@@ -171,6 +180,7 @@ defmodule SymphonyElixir.Stage do
       |> Keyword.put(:stage_id, stage.id)
       |> maybe_put(:max_turns, stage.max_turns)
       |> maybe_put(:epic, epic_context_from_metadata(wi))
+      |> maybe_put(:pr, pr_context_from_work_item(wi))
 
     {:ok, opts}
   end
@@ -183,6 +193,38 @@ defmodule SymphonyElixir.Stage do
       numbers when is_list(numbers) and numbers != [] -> %{sub_issue_numbers: numbers}
       _ -> nil
     end
+  end
+
+  # PR-stage prompts (pr_first_review, pr_revalidate, pr_changes_requested,
+  # pr_ci_failed, pr_record_proof, pr_author_followup) reference variables
+  # like `{{ pr.number }}` and `{{ pr.head_sha }}` in their Liquid
+  # templates. The orchestrator preloads `WorkItem.attached_pr` before
+  # resolving the stage, so by the time we hit `dispatch_options/3` the
+  # PR struct is available — surface it on the opts so PromptBuilder can
+  # render those templates without falling back to `strict_variables`
+  # render errors.
+  defp pr_context_from_work_item(%WorkItem{} = wi) do
+    case WorkItem.pull_request(wi) do
+      %PullRequest{} = pr -> pull_request_to_template_map(pr)
+      _ -> nil
+    end
+  end
+
+  defp pull_request_to_template_map(%PullRequest{} = pr) do
+    %{
+      number: pr.number,
+      head_sha: pr.head_sha,
+      head_ref: pr.head_ref,
+      state: pr.state,
+      draft: pr.draft,
+      url: pr.url,
+      title: pr.title,
+      author_login: pr.author_login,
+      linked_issue_number: pr.linked_issue_number,
+      ci_status: pr.ci_status,
+      created_at: pr.created_at,
+      updated_at: pr.updated_at
+    }
   end
 
   defp epic_plan_stage do

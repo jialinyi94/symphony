@@ -75,6 +75,29 @@ defmodule SymphonyElixir.StageDispatchOptionsTest do
       assert opts[:max_turns] == 2
     end
 
+    test "PR-stage opts carry a :pr context with pr.number, head_sha, ci_status, etc." do
+      wi = pr_wi(head_sha: "abc123", ci_status: :success)
+      stage = Enum.find(Stage.defaults(), &(&1.id == :pr_first_review))
+
+      assert {:ok, opts} = Stage.dispatch_options(stage, wi)
+      pr = Keyword.fetch!(opts, :pr)
+
+      # Exact fields the WORKFLOW.md PR prompts rely on.
+      assert pr.number == 149
+      assert pr.head_sha == "abc123"
+      assert pr.state == :open
+      assert pr.draft == false
+      assert pr.ci_status == :success
+    end
+
+    test "non-PR stage (issue_implement) omits :pr key" do
+      wi = issue_wi("Todo")
+      stage = Enum.find(Stage.defaults(), &(&1.id == :issue_implement))
+
+      assert {:ok, opts} = Stage.dispatch_options(stage, wi)
+      refute Keyword.has_key?(opts, :pr)
+    end
+
     test "pr_record_proof → implementer role + :pr_record_proof variant + 3 turn budget" do
       wi =
         pr_wi(

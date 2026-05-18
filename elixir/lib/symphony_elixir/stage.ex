@@ -44,10 +44,19 @@ defmodule SymphonyElixir.Stage do
 
   Override via application env (`:symphony_elixir, :reviewer_login`) or
   fall back to the WORKFLOW-typical default.
+
+  The returned value is run through `PullRequest.normalize_login/1` so an
+  operator who configures the literal GitHub bot login (e.g.
+  `"reviewer-is-all-u-need[bot]"`) still matches the keys in
+  `latest_reviews_by_author`, which the GitHub adapter normalizes on the
+  way in. Without this, configured `[bot]` suffixes silently break the
+  PR predicates.
   """
   @spec reviewer_login() :: String.t()
   def reviewer_login do
-    Application.get_env(:symphony_elixir, :reviewer_login, "reviewer-is-all-u-need")
+    :symphony_elixir
+    |> Application.get_env(:reviewer_login, "reviewer-is-all-u-need")
+    |> PullRequest.normalize_login()
   end
 
   defstruct [
